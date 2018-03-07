@@ -1,0 +1,14 @@
+*.cmd
+*.o
+*.ko
+*.so
+*.mod.c
+*.swp
+*.patch
+modules.order
+Module.symvers
+.tmp_versions
+sensor_def.h
+GPATH
+GRTAGS
+GTAGS

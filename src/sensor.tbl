@@ -1,0 +1,65 @@
+#
+# Copyright (C) 2017-2018 NEC Corporation
+# This file is part of VE Driver.
+#
+# VE Driver is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# VE Driver is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with the VE Driver; if not, see
+# <http://www.gnu.org/licenses/>.
+#
+#
+# sensor.tbl
+#
+# Definition of sensor sysfs file number
+# and corresponding decoder
+#
+# format:
+# <sensor number>	<decoder macro>
+
+0	sensor_type_a
+1	sensor_type_a
+2	sensor_type_b
+3	sensor_type_l
+4	sensor_type_c
+5	sensor_type_c
+6	sensor_type_c
+7	sensor_type_c
+8	sensor_type_d
+9	sensor_type_d
+10	sensor_type_e
+11	sensor_type_f
+12	sensor_type_g
+13	sensor_type_g
+14	sensor_type_h
+15	sensor_type_h
+16	sensor_type_h
+17	sensor_type_h
+18	sensor_type_h
+19	sensor_type_h
+20	sensor_type_h
+21	sensor_type_h
+22	sensor_type_h
+23	sensor_type_h
+24	sensor_type_i
+25	sensor_type_i
+26	sensor_type_i
+27	sensor_type_j
+28	sensor_type_i
+29	sensor_type_k
+30	sensor_type_m
+31	sensor_type_c
+32	sensor_type_n
+33	sensor_type_n
+34	sensor_type_n
+35	sensor_type_n
+36	sensor_type_n
+37	sensor_type_n

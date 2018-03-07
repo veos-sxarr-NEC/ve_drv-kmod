@@ -1,0 +1,129 @@
+#
+# Vector Engine Driver
+#
+# Copyright (C) 2017-2018 NEC Corporation
+# This file is part of VE Driver.
+#
+# VE Driver is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# VE Driver is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with the VE Driver; if not, see
+# <http://www.gnu.org/licenses/>.
+#
+
+# Define the kmod package name here.
+%define kmod_name ve_drv
+
+# Set install prefix to @prefix@
+%define	_prefix	@prefix@
+
+# If kversion isn't defined on the rpmbuild line, define it here.
+%{!?kversion: %define kversion %(uname -r)}
+%define krelease %(uname -r | sed s/\.`arch`//)
+
+Name:		@PACKAGE@
+Version:	@VERSION@
+Release:	@RELEASE@%{?dist}
+Group:		System Environment/Kernel
+License:	GPLv2
+Source0:	@PACKAGE@-@VERSION@.tar.gz
+Summary:	%{kmod_name} kernel module
+Vendor:		NEC Corporation
+Packager:	NEC Corporation
+BuildRequires:	kernel-headers = %{krelease}, vp-kmod-devel >= 0.4.1
+Requires:       kernel = %{krelease}, vp-kmod >= 0.4.1
+
+%description
+VE Driver kernel modules.
+
+%package        devel
+Summary:        Headers for building apps that use ve_drv module
+Group:          System Environment/Kernel
+Requires:       %{name} = %{version}-%{release}
+Requires:       vp-kmod-devel >= 0.4.1
+
+%description    devel
+This package contains header required to build applications that
+use ve_drv module
+
+%prep
+%setup -q
+
+%build
+%configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@
+make %{?_smp_mflags}
+
+%install
+%{__rm} -rf $RPM_BUILD_ROOT
+make install DESTDIR=$RPM_BUILD_ROOT
+
+%clean
+%{__rm} -rf $RPM_BUILD_ROOT
+
+%pre
+/bin/systemctl stop ve_drv > /dev/null 2>&1
+/bin/systemctl disable ve_drv > /dev/null 2>&1
+/sbin/depmod -a
+if modinfo ve_drv > /dev/null 2>&1;
+then
+	/sbin/modprobe -r ve_drv
+fi
+
+%preun
+case "$1" in
+	0)
+	# uninstall
+	/bin/systemctl stop ve_drv > /dev/null 2>&1
+	/bin/systemctl disable ve_drv > /dev/null 2>&1
+	/sbin/depmod -a
+	if modinfo ve_drv > /dev/null 2>&1;
+	then
+		/sbin/modprobe -r ve_drv
+	fi
+	;;
+	1)
+	# upgrade
+	# do nothing
+	;;
+esac
+
+%post
+/sbin/depmod -a
+/bin/systemctl enable ve_drv
+case "$1" in
+	1)
+	# install
+	if ! /bin/systemctl restart ve_drv
+	then
+		# We can't abort/rollback RPM transaction when we reach here
+		# This is just for warning
+		exit 1
+	fi
+	;;
+	2)
+	# upgrade
+	# do nothing
+	;;
+esac
+
+%files
+%defattr(-,root,root,-)
+%{_prefix}/*
+%config(noreplace) %{_sysconfdir}/modprobe.d/*
+%config(noreplace) %{_sysconfdir}/dracut.conf.d/*
+/lib/modules/%{kversion}/extra/*
+%config @SYSTEMD_UNITDIR@/*
+
+%files devel
+%defattr(-,root,root,-)
+%{_includedir}/*.h
+
+%changelog
