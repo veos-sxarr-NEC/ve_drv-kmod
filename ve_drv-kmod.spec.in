@@ -25,12 +25,12 @@
 # Set install prefix to @prefix@
 %define	_prefix	@prefix@
 
-# If kversion isn't defined on the rpmbuild line, define it here.
-%{!?kversion: %define kversion %(uname -r)}
+# Define Kernel version for rpm name here.
+%define REL_KVER	%(echo @KERNEL@ | sed -s "s/\.el.\.x86_64//" | tr - _)
 
 Name:		@PACKAGE@
 Version:	@VERSION@
-Release:	@RELEASE@%{?dist}
+Release:	%{REL_KVER}@RELEASE@%{?dist}
 Group:		System Environment/Kernel
 License:	GPLv2
 Summary:	%{kmod_name} kernel module
@@ -50,21 +50,21 @@ Requires:       vp-kmod-devel >= 0.4.1
 
 #Sources
 Source0:	@PACKAGE@-@VERSION@.tar.gz
-Source10:       kmodtool-%{kmod_name}-e17.sh
+Source10:	kmodtool-%{kmod_name}-e17.sh
 
 %description    devel
 This package contains header required to build applications that
 use ve_drv module
 
 # Magic hidden here.
-%{expand:%(sh %{SOURCE10} rpmtemplate %{kmod_name} %{kversion} "")}
+%{expand:%(sh %{SOURCE10} rpmtemplate %{kmod_name} @KERNEL@ "")}
 
 %prep
 %setup -q -a 0
 echo "override %{kmod_name} * weak-updates/%{kmod_name}" > kmod-%{kmod_name}.conf
 
 %build
-%configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@
+%configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@ --with-kernel=@KERNEL@
 make %{?_smp_mflags}
 
 %install
@@ -96,7 +96,7 @@ fi
 %{_prefix}/*
 %config(noreplace) %{_sysconfdir}/modprobe.d/*
 %config(noreplace) %{_sysconfdir}/dracut.conf.d/*
-/lib/modules/%{kversion}/extra/*
+/lib/modules/@KERNEL@/extra/*
 %config @SYSTEMD_UNITDIR@/*
 
 %files devel
