@@ -42,6 +42,7 @@
 
 /* VE model */
 #define ASIC_MODEL_0			(0x01)
+#define ASIC_MODEL_1			(0x02)
 #define QEMU_MODEL_0			(0xFE)
 #define FPGA_MODEL_104			(0x68)
 #define FPGA_MODEL_105			(0x69)

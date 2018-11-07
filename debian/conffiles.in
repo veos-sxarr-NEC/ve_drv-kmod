@@ -1,0 +1,3 @@
+@sysconfdir@/modprobe.d/ve_drv.conf
+@sysconfdir@/dracut.conf.d/ve_drv.conf
+@SYSTEMD_UNITDIR@/ve_drv.service

@@ -30,7 +30,8 @@ EXTRA_DIST = src/Makefile src/main.c src/fops.c src/firmware.c \
 	     src/commitid.h \
 	     src/ve_drv-ctl systemd/ve_drv.service.in \
 	     dracut/ve_drv.conf \
-	     ve_drv-kmod.spec
+	     ve_drv-kmod.spec \
+	     debian
 CLEANFILES = systemd/ve_drv.service
 
 # git commit id

@@ -43,6 +43,7 @@
 #include <linux/aer.h>
 #include <linux/idr.h>
 #include <linux/dma-mapping.h>
+#include <linux/vmalloc.h>
 #include "../config.h"
 #include "commitid.h"
 #include "ve_drv.h"
@@ -247,7 +248,7 @@ static void ve_drv_del_ve_node(struct ve_dev *vedev)
 		kfree(node->cr_map[entry]);
 	kfree(node->cr_map);
 
-	kfree(node);
+	vfree(node);
 }
 
 /**
@@ -408,9 +409,10 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 	int ret = 0;
 	struct ve_node *node;
 
-	node = kzalloc(sizeof(struct ve_node), GFP_KERNEL);
+	node = vzalloc(sizeof(struct ve_node));
 	if (!node)
 		return -ENOMEM;
+
 	vedev->node = node;
 	node->online_jiffies = -1;
 
@@ -1023,6 +1025,7 @@ static int ve_device_needs_firm_update(struct ve_dev *vedev)
 
 	switch (info->model) {
 	case ASIC_MODEL_0:
+	case ASIC_MODEL_1:
 		return true;
 	case FPGA_MODEL_104:
 	case FPGA_MODEL_105:

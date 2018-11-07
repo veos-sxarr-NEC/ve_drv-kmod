@@ -1,0 +1,10 @@
+#/bin/bash
+#set -e
+
+/bin/systemctl stop ve_drv > /dev/null 2>&1
+/bin/systemctl disable ve_drv > /dev/null 2>&1
+/sbin/depmod -a
+if modinfo ve_drv > /dev/null 2>&1;
+then
+	/sbin/modprobe -r ve_drv
+fi

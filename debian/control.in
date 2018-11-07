@@ -1,0 +1,25 @@
+Source: @PACKAGE@
+Section: otherosfs
+Priority: extra
+Maintainer: NEC Corporation
+Build-Depends: debhelper (>=10), dh-autoreconf,
+	       vp-kmod-dev (>= 0.4.1)
+Standards-Version: 3.9.8
+
+Package: @PACKAGE@
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+	 vp-kmod (>= 0.4.1)
+Description:VE Driver kernel modules.
+
+Package: @PACKAGE@-dev
+Architecture: any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         @PACKAGE@ (= @VERSION@-@RELEASE@),
+	 vp-kmod-dev (>= 0.4.1)
+Description: devel
+This package contains header required to build applications that
+use ve_drv module

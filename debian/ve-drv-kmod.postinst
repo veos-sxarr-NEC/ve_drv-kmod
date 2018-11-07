@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+depmod -a
+
+#DEBHELPER#
+
+/bin/systemctl enable ve_drv > /dev/null 2>&1
+
+exit 0

@@ -1,7 +1,7 @@
 #                                               -*- Autoconf -*-
 # Process this file with autoconf to produce a configure script.
 AC_PREREQ([2.69])
-AC_INIT([ve_drv-kmod], [1.2.2])
+AC_INIT([ve_drv-kmod], [1.3.2])
 AC_CONFIG_SRCDIR([src/main.c])
 AM_INIT_AUTOMAKE([foreign])
 AC_CONFIG_MACRO_DIR([m4])
@@ -59,5 +59,9 @@ AC_TYPE_UINT64_T
 # Checks for library functions.
 
 AC_CONFIG_FILES([Makefile
-		 ve_drv-kmod.spec])
+		 ve_drv-kmod.spec
+		 debian/rules
+		 debian/control
+		 debian/ve-drv-kmod.install
+		 debian/ve-drv-kmod-dev.install])
 AC_OUTPUT

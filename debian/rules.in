@@ -1,0 +1,43 @@
+#!/usr/bin/make -f
+SHELL=/bin/bash
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all,-format
+export DEB_VENDOR = "NEC Corporation"
+export PREFIX = "@prefix@"
+
+%:
+	dh $@ --with systemd
+
+override_dh_auto_configure:
+	autoreconf -i --force
+	dh_auto_configure -- --prefix=${PREFIX} \
+			--with-release-id=@RELEASE@ \
+			--with-systemd-unitdir=@SYSTEMD_UNITDIR@
+	chmod a+x debian/rules
+
+override_dh_install:
+	dh_install
+
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info
+
+override_dh_systemd_start:
+	dh_systemd_start --no-stop-on-upgrade --no-restart-after-upgrade
+
+clean:
+	dh_testdir
+	dh_testroot
+	dh_auto_clean
+	dh_clean
+
+install:
+	build
+	dh_testdir
+	dh_testroot
+	dh_clean
+	dh_installdirs
+
+binary-arch:
+
+binary:
+

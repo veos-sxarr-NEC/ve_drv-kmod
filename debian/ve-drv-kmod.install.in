@@ -1,0 +1,5 @@
+.@prefix@/sbin/ve_drv-ctl
+.@KERNEL_MOD@/*.ko
+.@sysconfdir@/modprobe.d/*.conf
+.@sysconfdir@/dracut.conf.d/*.conf
+.@SYSTEMD_UNITDIR@/*
