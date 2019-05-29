@@ -104,4 +104,10 @@
 #define GS_CHIP_RESET_DATA			(0x0000000000000100)
 #define LINK_DOWN_EIF_INH_DATA			(0x00A9700000000000)
 
+/* NUMA enable cores, etc */
+#define NUMA0_CORES	(0x1f)
+#define NUMA1_CORES	(0x3e0)
+#define NUMA_MEM_BLOCK_SIZE	(0x4000000)
+#define FIRST_MEM_NODE	(0)
+
 #endif /* VE_HW_H_INCLUDE_ */

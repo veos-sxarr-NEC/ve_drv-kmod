@@ -1134,6 +1134,85 @@ static ssize_t abi_version_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(abi_version);
 
+/**
+ * @brief sysfs show method of the enable bit map of VE cores to the buffer.
+ *		The value is AND of NUMA0_CORES and cores_enable
+ *
+ * @param[in] dev: Device pointer to the sysfs device
+ * @param[in] attr: device attribute structure. It isn't used in this function,
+ *						but expanded function requires.
+ * @param[out] buf: Write buffer
+ *
+ * @return the number of characters printed
+ */
+static ssize_t numa0_cores_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct ve_dev *vedev = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "0x%x\n",
+			NUMA0_CORES & vedev->node->hw_info.core_enables);
+}
+static DEVICE_ATTR_RO(numa0_cores);
+
+/**
+ * @brief sysfs show method of the enable bit map of VE cores to the buffer.
+ *		The value is AND of NUMA1_CORES and cores_enable
+ *
+ * @param[in] dev: Device pointer to the sysfs device
+ * @param[in] attr: device attribute structure. It isn't used in this function,
+ *                                              but expanded function requires.
+ * @param[out] buf: Write buffer
+ *
+ * @return the number of characters printed
+ */
+static ssize_t numa1_cores_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct ve_dev *vedev = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "0x%x\n",
+			NUMA1_CORES & vedev->node->hw_info.core_enables);
+}
+static DEVICE_ATTR_RO(numa1_cores);
+
+/**
+ * @brief sysfs show method of the value dividing physical memory into
+ *		the NUMA node's memory unit. The value must be 0x4000000.
+ *
+ * @param[in] dev: Device pointer to the sysfs device
+ * @param[in] attr: device attribute structure. It isn't used in this function,
+ *                                              but expanded function requires.
+ * @param[out] buf: Write buffer
+ *
+ * @return the number of characters printed
+ */
+static ssize_t numa_mem_block_size_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "0x%x\n", NUMA_MEM_BLOCK_SIZE);
+}
+static DEVICE_ATTR_RO(numa_mem_block_size);
+
+
+/**
+ * @brief sysfs show method of the number of which NUMA node belongs to
+ *		the first physical memory unit.
+ *
+ * @param[in] dev: Device pointer to the sysfs device
+ * @param[in] attr: device attribute structure. It isn't used in this function,
+ *                                              but expanded function requires.
+ * @param[out] buf: Write buffer
+ *
+ * @return the number of characters printed
+ */
+static ssize_t first_mem_node_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", FIRST_MEM_NODE);
+}
+static DEVICE_ATTR_RO(first_mem_node);
+
 #ifdef VE_DRV_DEBUG
 /* for debug */
 static ssize_t cond_upper_show(struct device *dev,
@@ -1377,6 +1456,10 @@ static struct attribute *sysfs_attrs[] = {
 	&dev_attr_task_id_all.attr,
 	&dev_attr_task_id_dead.attr,
 	&dev_attr_abi_version.attr,
+	&dev_attr_numa0_cores.attr,
+	&dev_attr_numa1_cores.attr,
+	&dev_attr_numa_mem_block_size.attr,
+	&dev_attr_first_mem_node.attr,
 #ifdef VE_DRV_DEBUG
 	&dev_attr_core_status.attr,
 	&dev_attr_cond_upper.attr,
