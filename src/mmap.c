@@ -41,13 +41,22 @@
 #include <linux/mm.h>
 
 #include <linux/uaccess.h>
-
+#include <linux/version.h>
+#if (KERNEL_VERSION(4, 18, 0) <= LINUX_VERSION_CODE)
+#include <linux/cred.h>
+#endif
 #include "ve_drv.h"
 #include "internal.h"
 
 static void ve_vm_open(struct vm_area_struct *);
 static void ve_vm_close(struct vm_area_struct *);
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 static int ve_vm_fault(struct vm_area_struct *, struct vm_fault *);
+#elif (KERNEL_VERSION(4, 17, 0) > LINUX_VERSION_CODE)
+static int ve_vm_fault(struct vm_fault *);
+#else
+static vm_fault_t ve_vm_fault(struct vm_fault *);
+#endif
 
 #ifdef VE_DRV_DEBUG
 int ve_access_phys(struct vm_area_struct *vma, unsigned long addr,
@@ -326,8 +335,20 @@ static int ve_map_is_permitted(struct ve_dev *vedev, int bar, off_t bar_offset)
  * @return VM_FAULT_NOPAGE on success.
  *         VM_FAULT_SIGBUS on failure.
  */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 static int ve_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
+#elif (KERNEL_VERSION(4, 17, 0) > LINUX_VERSION_CODE)
+
+static int ve_vm_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+#else
+static vm_fault_t ve_vm_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	vm_fault_t fault_reason;
+#endif
 	unsigned long offset, bar_offset, pfn;
 	int err;
 	struct ve_dev *vedev = vma->vm_private_data;
@@ -341,9 +362,15 @@ static int ve_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (bar_offset == (unsigned long)(-1L)) {
 		pdev_dbg(vedev->pdev, "fault at invalid offset: offset=0x%lx\n",
 		       offset);
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 		pdev_dbg(vedev->pdev,
 		       "(vma->vm_pgoff = %lu, vmf->pgoff = %lu)(addr = %p)\n",
 			vma->vm_pgoff, vmf->pgoff, vmf->virtual_address);
+#else
+		pdev_dbg(vedev->pdev,
+		       "(vma->vm_pgoff = %lu, vmf->pgoff = %lu)(addr = %lu)\n",
+			vma->vm_pgoff, vmf->pgoff, vmf->address);
+#endif
 		return VM_FAULT_SIGBUS;
 	}
 
@@ -359,8 +386,13 @@ static int ve_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	err = ve_map_is_permitted(vedev, bar, bar_offset);
 	if (err)
 		return VM_FAULT_SIGBUS;
-
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 	vaddr_start = ((unsigned long)vmf->virtual_address) & PAGE_MASK;
+#else
+	vaddr_start = ((unsigned long)vmf->address) & PAGE_MASK;
+#endif
+
+#if (RHEL_RELEASE_VERSION(8,2) > RHEL_RELEASE_CODE)
 	pdev_dbg(vedev->pdev, "vm_insert_pfn (va=%p, pfn=%lu)\n",
 			(void *)vaddr_start, pfn);
 	err = vm_insert_pfn(vma, vaddr_start, pfn);
@@ -370,6 +402,17 @@ static int ve_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	pdev_err(vedev->pdev,
 			"vm_insert_pfn(va=%p, pfn=%lu): returned %d\n",
 			(void *)vaddr_start, pfn, err);
+#else
+	pdev_dbg(vedev->pdev, "vmf_insert_pfn (va=%p, pfn=%lu)\n",
+			(void *)vaddr_start, pfn);
+	fault_reason = vmf_insert_pfn(vma, vaddr_start, pfn);
+	if (fault_reason == VM_FAULT_NOPAGE)
+		return VM_FAULT_NOPAGE;
+
+	pdev_err(vedev->pdev,
+			"vmf_insert_pfn(va=%p, pfn=%lu): returned %d\n",
+			(void *)vaddr_start, pfn, fault_reason);
+#endif
 	return VM_FAULT_SIGBUS;
 }
 

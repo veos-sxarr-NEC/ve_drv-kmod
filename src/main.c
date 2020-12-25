@@ -652,6 +652,7 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 	struct ve_dev *vedev = pci_get_drvdata(pdev);
 	struct ve_node *node;
 	int core_id = entry;
+	unsigned long flags;
 
 	pdev_trace(vedev->pdev);
 
@@ -665,7 +666,7 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 		return IRQ_HANDLED;
 	}
 
-	spin_lock(&vedev->node->lock);
+	spin_lock_irqsave(&vedev->node->lock, flags);
 	/* increment interrupt count */
 	node->core[core_id]->count++;
 
@@ -686,7 +687,7 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 			PCI_BAR2_SCR_OFFSET + CREG_INTERRUPT_VECTOR,
 			(uint64_t)0x8000000000000000 >> core_id);
 
-	spin_unlock(&vedev->node->lock);
+	spin_unlock_irqrestore(&vedev->node->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -704,11 +705,12 @@ static irqreturn_t ve_intr_notify(int entry, struct pci_dev *pdev)
 	struct ve_dev *vedev = pci_get_drvdata(pdev);
 	struct ve_node *node = vedev->node;
 	uint64_t cond_bit = 0;
+	unsigned long flags;
 
 	pdev_trace(vedev->pdev);
 
 	/* set condition bit */
-	spin_lock(&node->lock);
+	spin_lock_irqsave(&node->lock, flags);
 	if (entry < 64) {
 		cond_bit = 0x1ULL << entry;
 		node->cond.lower |= cond_bit;
@@ -717,7 +719,7 @@ static irqreturn_t ve_intr_notify(int entry, struct pci_dev *pdev)
 		cond_bit = 0x1ULL << entry;
 		node->cond.upper |= cond_bit;
 	}
-	spin_unlock(&node->lock);
+	spin_unlock_irqrestore(&node->lock, flags);
 
 	/* wake up */
 	wake_up_interruptible(&node->waitq);
@@ -1338,7 +1340,11 @@ static inline void do_ve_secondary_bus_reset(struct ve_dev *vedev)
 	do_link_down_eif_inh(vedev);
 
 	/* Issue secondary bus reset */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 	pci_reset_bridge_secondary_bus(parent);
+#else
+	pci_bridge_secondary_bus_reset(parent);
+#endif
 }
 
 static int ve_reset_and_fwupdate(struct ve_dev *vedev, uint64_t sbr,
@@ -1465,6 +1471,7 @@ static int ve_enable_irqs(struct ve_dev *vedev)
 	 * by pci_msix_vec_count(). So something is wrong with previous code
 	 * if this returns positive value.
 	 */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 	err = pci_enable_msix(pdev, vedev->msix_entries, vedev->msix_nvecs);
 	if (err < 0) {
 		pdev_err(pdev, "Failed to enable MSI-X\n");
@@ -1474,6 +1481,19 @@ static int ve_enable_irqs(struct ve_dev *vedev)
 		err = -1;
 		goto err_enable_msix;
 	}
+
+#else
+	err = pci_enable_msix_range(pdev, vedev->msix_entries, vedev->msix_nvecs,vedev->msix_nvecs);
+	if (err < 0) {
+		pdev_err(pdev, "Failed to enable MSI-X\n");
+		goto err_enable_msix;
+	} else if (err != vedev->msix_nvecs ) {
+		pdev_err(pdev, "Failed to count MSI-X vector. (%d)\n", err);
+		err = -1;
+		goto err_enable_msix;
+	}
+
+#endif
 
 	for (entry = 0; entry < vedev->msix_nvecs; entry++) {
 		err = request_irq(vedev->msix_entries[entry].vector,

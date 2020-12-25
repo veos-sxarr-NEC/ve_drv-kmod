@@ -46,6 +46,12 @@
 #include "ve_drv.h"
 #include "internal.h"
 
+#include <linux/version.h>
+#if (KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE)
+#include <linux/sched/task.h>
+#include <linux/sched/mm.h>
+#endif
+
 /**
  * @brief open method of VE file operation
  *

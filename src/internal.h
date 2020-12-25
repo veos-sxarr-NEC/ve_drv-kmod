@@ -257,7 +257,6 @@ static inline void ve_bar2_write64_delay(struct ve_dev *vedev, off_t offset,
 	pdev_dbg(vedev->pdev, "write: offset = 0x%016llx, val = %016llx\n",
 			(uint64_t)offset, val);
 	ve_mmio_write64(vedev->bar[2] + offset, val);
-	mdelay(delay);
 }
 
 /**
