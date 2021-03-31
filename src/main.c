@@ -143,6 +143,11 @@ module_param(hw_intr_test_param, int, 0600);
 MODULE_PARM_DESC(hw_intr_test_param,
 		"This parameter is used by HW test");
 
+/* Wait time after VE ESET parameter */
+int wait_after_vereset_sec = 16;	/* 15sec by default */
+module_param(wait_after_vereset_sec, int, 0600);
+MODULE_PARM_DESC(wait_after_vereset_sec, "wait time after vereset value in sec");
+
 /* FPGA init parameters */
 static int hw_skip_fpga_init;
 module_param(hw_skip_fpga_init, int, 0600);
@@ -417,8 +422,11 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 	node->online_jiffies = -1;
 
 	ret = ve_drv_fill_hw_info(vedev);
-	if (ret)
+	if (ret){
+		vedev->node = NULL;
+		kfree(node);
 		return -1;
+	}
 	node->core_fls = fls(node->hw_info.core_enables);
 	pdev_dbg(vedev->pdev, "core_fls = 0x%x\n", node->core_fls);
 	ve_drv_fill_model_info(vedev);
@@ -491,6 +499,8 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 		kfree(node->cr_map[free_element]);
 	kfree(node->cr_map);
  err_cr_map:
+	vedev->node = NULL;
+	kfree(node);
 	return ret;
 }
 
@@ -1047,7 +1057,7 @@ static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
 	struct pci_dev *pdev = vedev->pdev;
 	struct pci_dev *parent = pdev->bus->self;
 	int err;
-
+	int err_discard;
 	pdev_trace(vedev->pdev);
 
 	/*
@@ -1072,8 +1082,9 @@ static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
 				err);
 	} else if (*aer_cap & PCI_EXP_AER_FLAGS) {
 		/* AER should be disabled temporarily if it is enabled */
-		err = pci_disable_pcie_error_reporting(parent);
-		pdev_dbg(parent, "AER is temporarily disabled\n");
+	        /* ignore err 48740 */
+		err_discard = pci_disable_pcie_error_reporting(parent);
+		pdev_dbg(parent, "AER is temporarily disabled (%d:%d)\n", err,err_discard);
 	} else
 		pdev_dbg(parent, "AER is not enabled (did nothing)\n");
 
@@ -1353,7 +1364,7 @@ static int ve_reset_and_fwupdate(struct ve_dev *vedev, uint64_t sbr,
 	struct pci_dev *pdev = vedev->pdev;
 	int err;
 	u16 aer_cap;
-
+	int retry=0;
 	pdev_trace(vedev->pdev);
 
 	err = ve_prepare_for_chip_reset(vedev, &aer_cap, irq, sbr);
@@ -1371,8 +1382,16 @@ static int ve_reset_and_fwupdate(struct ve_dev *vedev, uint64_t sbr,
 	else
 		do_ve_chip_reset(vedev);
 
-	/* Wait 1 sec */
-	ssleep(1);
+	/* Wait wait_after_vereset_sec sec */
+	do {
+		ssleep(1);
+		err = ve_check_pci_link(vedev->pdev);
+	} while( ++retry < wait_after_vereset_sec && err );
+
+	if(err){
+		pdev_err(pdev, "Waited for %d seconds, but VE RESET failed\n", retry);
+		return err;
+	}
 
 	/* Skip FW loading */
 	goto recover_chip_reset;
