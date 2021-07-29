@@ -83,7 +83,7 @@ find $RPM_BUILD_ROOT -type f -name \*.ko -exec %{__chmod} u+x \{\} \;
 
 %pre
 /bin/systemctl stop ve_drv > /dev/null 2>&1
-/bin/systemctl disable ve_drv > /dev/null 2>&1
+#/bin/systemctl disable ve_drv > /dev/null 2>&1
 /sbin/depmod -a
 if modinfo ve_drv > /dev/null 2>&1;
 then
