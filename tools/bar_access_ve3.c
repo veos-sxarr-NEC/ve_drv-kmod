@@ -7,7 +7,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
-#define _VE_ARCH_VE1_ 1
+
+#define _VE_ARCH_VE3_ 1
 #include "bar_access.h"
 
 void *map_bar(int *fd, int bar, char *filename)
@@ -21,18 +22,18 @@ void *map_bar(int *fd, int bar, char *filename)
 		return (void *)-1;
 	}
 
-	if (bar == VE1_BAR_01) {
-		size = VE1_BAR0_SIZE;
+	if (bar == VE3_BAR_01) {
+		size = VE3_BAR0_SIZE;
 		bar_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-				*fd, VEDRV_VE1_MAP_BAR0_OFFSET);
-	} else if (bar == VE1_BAR_2) {
-		size = VE1_BAR2_SIZE;
+				*fd, VEDRV_VE3_MAP_BAR0_OFFSET);
+	} else if (bar == VE3_BAR_23) {
+		size = VE3_BAR2_SIZE;
 		bar_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-				*fd, VEDRV_VE1_MAP_BAR2_OFFSET);
-	} else if (bar == VE1_BAR_3) {
-		size = VE1_BAR3_SIZE;
+				*fd, VEDRV_VE3_MAP_BAR2_OFFSET);
+	} else if (bar == VE3_BAR_4) {
+		size = VE3_BAR4_SIZE;
 		bar_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-				*fd, VEDRV_VE1_MAP_BAR3_OFFSET);
+				*fd, VEDRV_VE3_MAP_BAR4_OFFSET);
 	} else {
 		fprintf(stderr, "invalid bar number(%d)\n", bar);
 		return (void *)-1;
@@ -49,12 +50,12 @@ int unmap_bar(int *fd, void *bar_addr, int bar)
 {
 	unsigned long size;
 
-	if (bar == VE1_BAR_01) {
-		size = VE1_BAR0_SIZE;
-	} else if (bar == VE1_BAR_2) {
-		size = VE1_BAR2_SIZE;
-	} else if (bar == VE1_BAR_3) {
-		size = VE1_BAR3_SIZE;
+	if (bar == VE3_BAR_01) {
+		size = VE3_BAR0_SIZE;
+	} else if (bar == VE3_BAR_23) {
+		size = VE3_BAR2_SIZE;
+	} else if (bar == VE3_BAR_4) {
+		size = VE3_BAR4_SIZE;
 	} else {
 		fprintf(stderr, "invalid bar number(%d)\n", bar);
 		return -1;

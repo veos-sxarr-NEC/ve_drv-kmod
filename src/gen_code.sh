@@ -27,7 +27,7 @@ do
 	echo "SENSOR_VALUE_STORE(${nr});";
 	echo "static SENSOR_DEVICE_ATTR(${nr});";
 done
-) > sensor.h
+)
 
 grep '^[0-9]' "$1" | (
 echo "static struct attribute *sensor_attrs[] = {"
@@ -40,4 +40,4 @@ echo "};"
 echo "static struct attribute_group sensor_attribute_group = {"
 echo "	.attrs = sensor_attrs"
 echo "};"
-) >> sensor.h
+)

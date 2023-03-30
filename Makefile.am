@@ -21,18 +21,28 @@
 
 ACLOCAL_AMFLAGS = -I m4
 sbin_SCRIPTS = src/ve_drv-ctl
-include_HEADERS = src/ve_drv.h
-EXTRA_DIST = src/Makefile src/main.c src/fops.c src/firmware.c \
-	     src/mmap.c src/fpga.c src/sysfs.c src/ve_drv.h src/decoder.h \
-	     src/internal.h src/hw.h src/gen_code.sh \
+include_HEADERS = src/ve_drv.h src/ve_drv_ve1.h src/ve_drv_ve3.h
+SENSOR_HDRS = src/sensor_ve1.h src/sensor_ve3.h
+EXTRA_DIST = src/Makefile src/main.c src/main_ve1.c src/main_ve3.c \
+	     src/firmware_ve1.c \
+	     src/fops.c src/fops_ve1.c src/fops_ve3.c \
+	     src/mmap.c src/mmap_ve1.c src/mmap_ve3.c \
+	     src/sysfs.c src/sysfs_ve1.c src/sysfs_ve3.c \
+	     src/sysfs_sensor_attr_gen.h src/ve_config_regs.c \
+	     src/ve_drv.h src/ve_drv_ve1.h src/ve_drv_ve3.h \
+	     src/decoder.h src/decoder.c \
+	     src/internal.h src/internal_ve1.h src/internal_ve3.h \
+	     src/hw.h src/hw_ve1.h src/hw_ve3.h src/gen_code.sh \
+	     src/mmio.h src/mmio_ve1.h src/mmio_ve3.h \
 	     src/ve_drv.conf \
-	     src/Module.symvers src/vp.h src/sensor.h \
+	     src/Module.symvers src/vp.h $(SENSOR_HDRS) src/sensor_ve1.tbl src/sensor_ve3.tbl \
 	     src/commitid.h \
 	     src/ve_drv-ctl systemd/ve_drv.service.in \
 	     dracut/ve_drv.conf \
 	     ve_drv-kmod.spec \
 	     debian
-CLEANFILES = systemd/ve_drv.service
+CLEANFILES = systemd/ve_drv.service $(SENSOR_HDRS) src/commitid.h
+dist_noinst_DATA = helper/ve_check_config
 
 # git commit id
 src/commitid.h:
@@ -44,10 +54,14 @@ src/Module.symvers:
 # header file of vp module
 src/vp.h:
 	cp @prefix@/include/vp.h $(abs_top_builddir)/src
-src/sensor.h:
-	$(srcdir)/src/gen_code.sh $(srcdir)/src/sensor.tbl
-	mv sensor.h $(abs_top_builddir)/src/
-src/ve_drv.ko: src/Module.symvers src/vp.h src/sensor.h src/commitid.h
+src/sensor_ve1.h: src/sensor_ve1.tbl
+	$(srcdir)/src/gen_code.sh $(srcdir)/src/sensor_ve1.tbl > sensor_ve1.h
+	mv sensor_ve1.h $(abs_top_builddir)/src/
+src/sensor_ve3.h: src/sensor_ve3.tbl
+	$(srcdir)/src/gen_code.sh $(srcdir)/src/sensor_ve3.tbl > sensor_ve3.h
+	mv sensor_ve3.h $(abs_top_builddir)/src/
+
+src/ve_drv.ko: src/Module.symvers src/vp.h $(SENSOR_HDRS) src/sensor_ve1.tbl src/sensor_ve3.tbl src/commitid.h
 	for file in $(EXTRA_DIST); do \
 		test -f $(builddir)/$$file || \
 		$(LN_S) $(abs_top_srcdir)/$$file $(builddir)/src; \
@@ -72,7 +86,8 @@ install-exec-hook: src/ve_drv.ko systemd/ve_drv.service
 
 clean-local:
 	$(MAKE) -C $(KERNEL_SRC) M=$(abs_top_builddir)/src clean
-	$(RM) $(abs_top_builddir)/src/sensor.h
+	$(RM) $(abs_top_builddir)/$(SENSOR_HDRS)
+	$(RM) $(abs_top_builddir)/src/commitid.h
 	$(RM) $(abs_top_builddir)/src/vp.h
 	$(RM) $(abs_top_builddir)/src/Module.symvers
 

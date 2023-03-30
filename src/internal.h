@@ -1,7 +1,7 @@
 /*
  * Vector Engine Driver
  *
- * Copyright (C) 2017-2018 NEC Corporation
+ * Copyright (C) 2017-2020 NEC Corporation
  * This file is part of VE Driver.
  *
  * VE Driver is free software; you can redistribute it and/or
@@ -23,9 +23,11 @@
  * @file internal.h
  * @brief VE driver header for kernel module
  */
-
+#ifndef VE_DRV_INTERNAL_H_INCLUDE_
+#define VE_DRV_INTERNAL_H_INCLUDE_
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/bitrev.h>
@@ -33,7 +35,8 @@
 #include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/cdev.h>
-#include <linux/fs.h>
+#include <linux/pid.h>
+#include <linux/kref.h>
 #include "hw.h"
 #include "ve_drv.h"
 
@@ -52,8 +55,6 @@
 #define TASK_STATE_DELETED	(2)
 #define TASK_STATE_RELEASED	(3)
 #define TASK_STATE_ASSIGNED	(4)
-
-#define NR_VE_SENSOR		(38)
 
 /**
  * @brief VE Core structure
@@ -81,20 +82,24 @@ struct ve_kuid_list {
 /**
  * @brief VE Device information read from PCI configuration space
  */
-struct ve_hw_info {
+struct ve_model_type {
 	uint8_t model;		/*!< Model */
 	uint8_t type;		/*!< Product Type */
 	uint8_t cpu_version;	/*!< CPU version */
 	uint8_t version;	/*!< Hardware version */
+};
+struct ve_hw_info {
+	struct ve_model_type model_type;
 	uint8_t num_of_core;	/*!< Number of cores on the model */
-	uint32_t core_enables;	/*!< bitmap of enabled cores */
-	uint64_t chip_sn[2];	/*!< chip serial 128bit */
-	uint64_t board_sn[2];	/*!< board serial 128bit */
+	uint64_t core_enables;	/*!< Bitmap of enabled cores */
+
 	uint16_t vmcfw_version;	/*!< VMC Firmware version */
 	uint16_t memory_size;	/*!< Physical memory size in GB */
 	uint16_t memory_clock;	/*!< Memory clock in MHz */
 	uint16_t core_clock;	/*!< Core clock in MHz */
 	uint16_t base_clock;	/*!< Base clock in MHz */
+	uint64_t chip_sn[2];	/*!< chip serial 128bit */
+	uint64_t board_sn[2];	/*!< board serial 128bit */
 };
 
 /**
@@ -109,6 +114,7 @@ struct ve_model_info {
 	uint32_t d_cache_size;	/*!< Level 1 d-cache size in KB */
 	uint32_t l2_cache_size;	/*!< Level 2 cache size in KB */
 	uint32_t l3_cache_size;	/*!< Level 3 cache size in KB */
+	uint32_t llc_cache_size;/*!< Level level cache size in KB */
 };
 
 /**
@@ -120,12 +126,13 @@ struct ve_node {
 						 * by vp module
 						 */
 	struct mutex page_mutex[NR_PD_LIST];	/*!< mutex for page_list */
-	struct ve_hw_info hw_info;	/*!< HW information obtained from
+	struct ve_hw_info hw_info;	/*!< Hw information obtained from
 					 * PCI configuration space
 					 */
 	struct ve_model_info model_info;/*!< VE model information */
+
 	struct mutex sysfs_mutex;	/*!< sysfs mutex lock */
-	uint16_t sensor_rawdata[NR_VE_SENSOR];	/*!< VE sensor values */
+	uint32_t *sensor_rawdata;	/*!< VE sensor values */
 	uint8_t ve_state;		/*!< VE HW state(defined in ve_drv.h) */
 	uint8_t os_state;		/*!< VE OS state(defined in ve_drv.h) */
 	uint8_t throttling_level;	/*!< Core throttling level (0 - 9) */
@@ -143,6 +150,7 @@ struct ve_node {
 				 *   Ex: 1 if core_enables == 0x1
 				 *       5 if core_enables == 0x10
 				 */
+
 	struct ve_core **core;	/*!< Array of VE cores */
 	struct list_head task_head;	/*!< Linked list head of VE task */
 	struct ve_kuid_list **cr_map;	/*!< Array of VE CR mapping info */
@@ -150,7 +158,7 @@ struct ve_node {
 	struct ve_kuid_list **mem_map;	/*!< Array of VE Memory mapping info */
 	struct mutex pcimap_mutex;	/*!< BAR0 map list mutex */
 	wait_queue_head_t waitq;	/*!< Interrupt wait queue */
-	struct ve_wait_irq cond;	/*!< Interrupt wait condition */
+	struct ve_wait_irq *cond;	/*!< Interrupt wait condition */
 	spinlock_t lock;	/*!<
 				 * This lock must be aquire while
 				 * changing the member of struct ve_core
@@ -160,7 +168,13 @@ struct ve_node {
 	uint8_t sysfs_crpage_entry;	/*!< CR Entry specified via sysfs */
 	uint16_t sysfs_pciatb_entry;	/*!< PCIATB Entry specified via sysfs */
 #endif
+	void *ve_archdep_data;
+
+	struct pid  *ownership;		/*!< VE ownership */
+	struct pid  *notifyfaulter;	/*!< VE notiyfault requester */
 };
+
+struct ve_arch_class;
 
 /**
  * @brief VE Device structure
@@ -183,9 +197,99 @@ struct ve_dev {
 	struct address_space *dev_mapping;	/*!< mmap address space */
 	int msix_nvecs;		/*!< Number of MSI-X interrupt vectors */
 	struct msix_entry *msix_entries;	/*!< MSI-X entries */
-	const struct firmware *firmware;	/*!< Firmware loading address */
 	struct ve_node *node;	/*!< VE node structure */
 	struct pci_saved_state *saved_state; /*!< PCI config data for restore */
+
+	const struct ve_arch_class *arch_class;/*!< VE architecture class */
+
+	wait_queue_head_t release_q;	/*!<VE remove wait queue */
+	struct kref   ve_dev_ref;       /* ve dev reference counter  */
+	struct kref   final_ref;        /* ve dev final reference counter  */
+	bool remove_processing;  /* ve_pci_remove is starting */
+
+};
+
+/**
+ * @brief VE class
+ */
+struct ve_arch_class {
+	char name[VEDRV_ARCH_CLASS_NAME_MAX];	/*!< architecture name */
+	int expected_bar_mask;	/*!< expected BARs */
+	size_t max_core_num;	/*!< maximum VE core number */
+	size_t num_sensors;	/*!< the number of sensors on VE */
+	int (*init_early)(struct ve_dev *);	/*!< initializer before mapping
+						 * PCI resources
+						 */
+	void (*fini_late)(struct ve_dev *);	/*!< finalizer after unmapping
+						 * PCI resources
+						 */
+	int (*fill_hw_info)(struct ve_dev *);/*!< fill HW information */
+	void (*fill_model_info)(const struct ve_dev *,
+			struct ve_model_info *);	/*!<
+						* fill model information
+						*/
+
+	int (*init_node)(struct ve_dev *, struct ve_node *);/*!<
+						* arch-dependent initializer
+						* on initialization of VE node
+						*/
+	void (*fini_node)(struct ve_dev *, struct ve_node *);/*!<
+						* arch-dependent finalizer
+						* on finalization of VE node
+						*/
+	int (*init_post_node)(struct ve_dev *); /*!<
+						 * arch-dependent initializer
+						 * after initialization of VE
+						 * node structure
+						 */
+	int (*init_post_core)(struct ve_dev *); /*!<
+						 * arch-dependent initializer
+						 * after initialization of VE
+						 * core structure
+						 */
+	int (*init_hw_check)(struct ve_dev *); /*!<
+						 * arch-dependent initializer
+						 * HW init check
+						 * core structure
+						 */
+
+	
+	void *(*exsrar_addr)(const struct ve_dev *, int);
+	uint64_t (*get_exs)(struct ve_dev *, int);/*!< execution status */
+
+	void (*request_stop_all)(struct ve_dev *);
+	int (*check_stopped)(struct ve_dev *);
+
+	int (*ve_arch_ioctl_check_permission)(const struct ve_dev *,
+					unsigned int, int *);
+	long (*ve_arch_ioctl)(struct file *filp, struct ve_dev *, unsigned int, unsigned long,
+				int *);
+
+	irqreturn_t (*ve_arch_intr)(struct ve_dev *, int);/*!<
+						 * interrupt handler
+						 */
+
+	size_t ve_wait_irq_size;/*!< size of arch-dependent interrupt vector */
+	uint64_t ve_irq_type;
+	int (*ve_arch_wait_intr)(struct ve_dev *, struct ve_wait_irq *,
+				struct timespec *);
+	uint64_t (*core_intr_undelivered)(const struct ve_dev *, int);/*!<
+						* check an undelivered core
+						* interrupt
+						*/
+
+	int (*ve_arch_map_range_offset)(const struct ve_dev *, off_t, size_t,
+				int *, unsigned long *);
+	int (*permit_to_map)(const struct ve_dev *, int, unsigned long);
+
+	int (*ve_state_transition)(struct ve_dev *, unsigned long,
+					unsigned long);
+
+	void (*ve_arch_release)(struct ve_dev *, struct ve_task *);
+	const struct attribute_group **ve_arch_sysfs_attr_groups;
+
+	size_t ve_archdep_size;/*!< the size of architecture-dependent data */
+	/* TODO */
 };
 
 /**
@@ -205,12 +309,31 @@ struct ve_task {
 	int state;		/*!< TASK_STATE_NEW, TASK_STATE_READY, ...  */
 	bool mmap;		/*!< Any memory mapping(true) or not(false) */
 	uint64_t exs;		/*!< EXS value */
+	uint64_t last_exs;	/*!< EXS value */
+	bool  ownership;	/*!< VE ownership */
 };
 
 /* main.c */
-int ve_firmware_update(struct ve_dev *vedev);
-int ve_chip_reset_sbr(struct ve_dev *vedev, uint64_t sbr);
+void ve_drv_disable_irqs(struct ve_dev *);
+int ve_drv_enable_irqs(struct ve_dev *);
 int ve_init_exsrar(struct ve_dev *vedev);
+int ve_check_pci_link(struct pci_dev *pdev);
+irqreturn_t ve_drv_generic_core_intr(struct ve_dev *, int,
+				void (*)(struct ve_dev *, int));
+irqreturn_t ve_drv_generic_node_intr(struct ve_dev *, int,
+				void (*)(struct ve_dev *, int));
+
+int ve1_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap,int sbr);
+int ve_prepare_for_chip_reset(struct ve_dev *vedev, u16 *aer_cap,int disable_irq, int sbr);
+int ve_drv_set_lnkctl2_target_speed(struct pci_dev *pdev, u8 link_speed);
+int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,int fw_update, int sbr);
+
+
+/* main_ve3.c: arch-independent code refers to the function. */
+const struct ve_arch_class *ve_arch_probe_ve3(struct ve_dev *vedev);
+
+/* main_ve1.c, arch-independent code refers to the function. */
+const struct ve_arch_class *ve_arch_probe_ve1(struct ve_dev *vedev);
 
 /* device file operations (fops.c) */
 int ve_drv_open(struct inode *ino, struct file *filp);
@@ -223,112 +346,32 @@ int ve_drv_del_all_task(struct ve_dev *vedev);
 void ve_drv_unassign_cr_all(struct ve_dev *vedev);
 void ve_drv_unassign_vemem_all(struct ve_dev *vedev);
 
+int ve_drv_generic_arch_wait_intr(struct ve_dev *,
+	struct ve_wait_irq *, struct timespec *,
+	bool (*)(const struct ve_wait_irq *, const struct ve_wait_irq *),
+	void (*)(struct ve_dev *, struct ve_wait_irq *, struct ve_wait_irq *));
+
+void ve_drv_device_put(struct ve_dev *vedev);
+void ve_drv_device_get(struct ve_dev *vedev);
+void ve_drv_final_put(struct ve_dev *vedev);
+void ve_drv_final_get(struct ve_dev *vedev);
+int ve_drv_unassign_task_from_core(struct ve_dev *vedev, pid_t tid_ns, int check_exsreg);
+
 /* device file mmap operation (mmap.c) */
+int ve_drv_check_pciatb_entry_permit(const struct ve_dev *vedev, int entry);
+int ve_drv_check_cr_entry_permit(const struct ve_dev *vedev, int entry);
 int ve_drv_mmap(struct file *filp, struct vm_area_struct *vma);
 int ve_unmap_mapping(struct ve_dev *vedev, struct ve_unmap *usr);
 
 /* sysfs.c */
 int ve_drv_init_sysfs(struct ve_dev *vedev);
 void ve_drv_fini_sysfs(struct ve_dev *vedev);
+void ve_init_intr_count(struct ve_dev *vedev);
 
-/* firmware.c */
-int ve_set_lnkctl2_target_speed(struct pci_dev *pdev, u8 link_speed);
-int ve_load_gen3_firmware(struct ve_dev *vedev);
-
-/* fpga.c */
-int ve_init_fpga(struct ve_dev *vedev);
-
-/**
- * @brief Write 64bit value to MMIO address
- *
- * @param[in] to: Target kernel virtual address
- * @param val: 64bit value to be stored
- */
-static inline void ve_mmio_write64(void *to, uint64_t val)
-{
-	memcpy_toio(to, &val, 8);
-	/* in case of other arch than x86 */
-	wmb();
-}
-
-static inline void ve_bar2_write64_delay(struct ve_dev *vedev, off_t offset,
-				   uint64_t val, int delay)
-{
-	pdev_dbg(vedev->pdev, "write: offset = 0x%016llx, val = %016llx\n",
-			(uint64_t)offset, val);
-	ve_mmio_write64(vedev->bar[2] + offset, val);
-}
-
-/**
- * @brief Write 64bit value to BAR2 space
- *
- * @param[in] vedev: VE device structure
- * @param offset: Offset from top of BAR2
- * @param val: 64bit value to be stored
- */
-static inline void ve_bar2_write64(struct ve_dev *vedev, off_t offset,
-				   uint64_t val)
-{
-	ve_bar2_write64_delay(vedev, offset, val, 0);
-}
-
-/**
- * @brief Write 64bit value to BAR2 space 20 times to avoid PCIe IP bug
- *
- * @param[in] vedev: VE device structure
- * @param offset: Offset from top of BAR2
- * @param val: 64bit value to be stored
- */
-static inline void ve_bar2_write64_20(struct ve_dev *vedev, off_t offset,
-				   uint64_t val)
-{
-	int i;
-
-	for (i = 0; i < 20; i++)
-		ve_bar2_write64(vedev, offset, val);
-}
-
-/**
- * @brief Read 64bit value from MMIO address
- *
- * @param[in] from: Target kernel virtual address
- * @param[out] val: Readed 64bit value will be stored
- */
-static inline void ve_mmio_read64(void *from, uint64_t *val)
-{
-	/* in case of other arch than x86 */
-	rmb();
-	memcpy_fromio(val, from, 8);
-}
-
-/**
- * @brief Read 64bit value from BAR2 space
- *
- * @param[in] vedev: VE device structure
- * @param offset: Offset from top of BAR2
- * @param[out] val: Readed 64bit value will be stored
- */
-static inline void ve_bar2_read64(struct ve_dev *vedev, off_t offset,
-				  uint64_t *val)
-{
-	ve_mmio_read64(vedev->bar[2] + offset, val);
-}
-
-/**
- * @brief Sync and read 64bit value from BAR2 space
- *
- * @param[in] vedev: VE device structure
- * @param offset: Offset from top of BAR2
- * @param[out] val: Readed 64bit value will be stored
- */
-static inline void ve_bar2_read64_sync(struct ve_dev *vedev, off_t offset,
-				  uint64_t *val)
-{
-	/* Sync in VE before read */
-	ve_bar2_write64(vedev, PCI_BAR2_SCR_OFFSET + CREG_SYNC_OFFSET, 0);
-
-	ve_bar2_read64(vedev, offset, val);
-}
+/* ve_config_regs.c */
+int ve_drv_read_ve_config_regs(const struct ve_dev *, size_t, u32 *);
+void ve_drv_set_model_type(struct ve_model_type *, u32);
+int ve_drv_read_model_type(const struct ve_dev *, struct ve_model_type *);
 
 /**
  * @brief Return reversed bit ordering value
@@ -346,63 +389,18 @@ static inline uint64_t ve_bitrev64(uint64_t value)
 extern int exsrar_poll_timeout_msec;
 extern int exsrar_poll_delay_nsec;
 extern int hw_intr_test_param;
+extern int clear_intvec_pci_access_exception;
+extern int panic_on_pci_access_exception;
+extern int wait_after_vereset_sec;
+#if defined(_VE_ARCH_VE3_)
+#include "internal_ve3.h"
+#elif defined(_VE_ARCH_VE1_)
+#include "internal_ve1.h"
+#else
+/*
+ * Since this header may be included from architecture independent source
+ * files, it is not error if no architecture is specified.
+ */
+#endif
 
-#define SENSOR_VALUE_SHOW(SENSOR, DECODER)			\
-static ssize_t sensor_##SENSOR##_show(				\
-		struct device *dev,				\
-		struct device_attribute *attr,			\
-		char *buf)					\
-{								\
-	ssize_t len;						\
-	struct ve_dev *vedev = dev_get_drvdata(dev);		\
-	struct ve_node *node = vedev->node;			\
-	uint16_t sensor_val;					\
-	int64_t print_val;					\
-								\
-	pdev_trace(vedev->pdev);				\
-								\
-	if (node->ve_state != VE_ST_ONLINE)			\
-		return -EIO;					\
-								\
-	mutex_lock(&node->sysfs_mutex);				\
-	sensor_val = node->sensor_rawdata[SENSOR];		\
-	if (sensor_val == 0xFFFF) {				\
-		len = -EAGAIN;					\
-		goto err;					\
-	}							\
-	print_val = DECODER(sensor_val);			\
-	len = scnprintf(buf, PAGE_SIZE,				\
-			"%lld\n", print_val);			\
-err:								\
-	mutex_unlock(&node->sysfs_mutex);			\
-								\
-	return len;						\
-}
-
-#define SENSOR_VALUE_STORE(SENSOR)			\
-static ssize_t sensor_##SENSOR##_store(			\
-		struct device *dev,			\
-		struct device_attribute *attr,		\
-		const char *buf, size_t count)		\
-{							\
-	struct ve_dev *vedev = dev_get_drvdata(dev);	\
-	struct ve_node *node = vedev->node;		\
-	unsigned long sensor_val;			\
-							\
-	pdev_trace(vedev->pdev);			\
-							\
-	if (node->ve_state != VE_ST_ONLINE)		\
-		return -EIO;				\
-							\
-	if (kstrtoul(buf, 0, &sensor_val) < 0)		\
-		return -EINVAL;				\
-							\
-	mutex_lock(&node->sysfs_mutex);			\
-	node->sensor_rawdata[SENSOR] =			\
-			(uint16_t)sensor_val;		\
-	mutex_unlock(&node->sysfs_mutex);		\
-							\
-	return count;					\
-}
-
-#define SENSOR_DEVICE_ATTR(SENSOR) DEVICE_ATTR_RW(sensor_##SENSOR)
+#endif

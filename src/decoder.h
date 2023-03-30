@@ -1,7 +1,7 @@
 /*
  * Vector Engine Driver
  *
- * Copyright (C) 2017-2018 NEC Corporation
+ * Copyright (C) 2017-2020 NEC Corporation
  * This file is part of VE Driver.
  *
  * VE Driver is free software; you can redistribute it and/or
@@ -24,23 +24,23 @@
  * @brief VE driver header for sensor decoding functions
  */
 
-#ifndef VE_DECODER_H_INCLUDE_
-#define VE_DECODER_H_INCLUDE_
+#ifndef VE_DRV_DECODER_H_INCLUDE_
+#define VE_DRV_DECODER_H_INCLUDE_
 
+int64_t ve_drv_sysfs_sensor_type_a(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_b(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_c(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_d(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_e(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_f(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_g(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_h(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_i(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_j(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_k(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_l(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_m(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_n(uint16_t raw_data);
+int64_t ve_drv_sysfs_sensor_type_N(uint32_t raw_data);
 
-static int64_t sensor_type_a(uint16_t raw_data);
-static int64_t sensor_type_b(uint16_t raw_data);
-static int64_t sensor_type_c(uint16_t raw_data);
-static int64_t sensor_type_d(uint16_t raw_data);
-static int64_t sensor_type_e(uint16_t raw_data);
-static int64_t sensor_type_f(uint16_t raw_data);
-static int64_t sensor_type_g(uint16_t raw_data);
-static int64_t sensor_type_h(uint16_t raw_data);
-static int64_t sensor_type_i(uint16_t raw_data);
-static int64_t sensor_type_j(uint16_t raw_data);
-static int64_t sensor_type_k(uint16_t raw_data);
-static int64_t sensor_type_l(uint16_t raw_data);
-static int64_t sensor_type_m(uint16_t raw_data);
-static int64_t sensor_type_n(uint16_t raw_data);
-
-#endif /* VE_DECODER_H_INCLUDE_ */
+#endif /* VE_DRV_DECODER_H_INCLUDE_ */

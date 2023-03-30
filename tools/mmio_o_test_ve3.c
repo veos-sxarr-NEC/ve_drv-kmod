@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <pthread.h>
-#define _VE_ARCH_VE1_ 1
+#define _VE_ARCH_VE3_ 1
 #include "bar_access.h"
 
 #ifdef DEBUG
@@ -255,6 +255,9 @@ main(int argc, char *argv[])
 	option_devfile = false;
 	mode = 0;
 
+	printf("Sorry,still not support yet!!\nn");
+	return 1;
+	
 	struct option long_options[] = {
 		{"devfile", required_argument, NULL, 'f'},
 		{"mode", no_argument, NULL, 'm'},
@@ -296,13 +299,13 @@ main(int argc, char *argv[])
 		case 1:
 		case 2:
 		case 3:
-			bar = VE1_BAR_01;
+			bar = VE3_BAR_01;
 			break;
 		case 4:
 		case 5:
 		case 6:
 		case 7:
-			bar = VE1_BAR_2;
+			bar = VE3_BAR_23;
 			break;
 		default:
 			usage();

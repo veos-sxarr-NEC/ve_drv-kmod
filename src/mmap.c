@@ -83,49 +83,6 @@ static const struct vm_operations_struct ve_vm_ops = {
 };
 
 /**
- * @brief Calculate phisical offset address of mmap
- *
- * @param[in] vedev: VE device structure
- * @param head: head of mapping address
- * @param size: mapping size
- * @param[out] bar: BAR number will be stored
- *
- * @return offset from each BAR.
- */
-static unsigned long ve_map_range_offset(struct ve_dev *vedev, uint64_t head,
-			       uint64_t size, int *bar)
-{
-	uint64_t tail = head + size - 1;
-
-	pdev_dbg(vedev->pdev, "head = %llx, tail = %llx\n", head, tail);
-
-	if (head >= VEDRV_MAP_BAR0_OFFSET &&
-	    head < VEDRV_MAP_BAR0_OFFSET + vedev->bar_size[0] &&
-	    tail >= VEDRV_MAP_BAR0_OFFSET &&
-	    tail < VEDRV_MAP_BAR0_OFFSET + vedev->bar_size[0]) {
-		/* mapping range is in BAR0 */
-		*bar = 0;
-		return head - VEDRV_MAP_BAR0_OFFSET;
-	} else if (head >= VEDRV_MAP_BAR2_OFFSET &&
-		   head < VEDRV_MAP_BAR2_OFFSET + vedev->bar_size[2] &&
-		   tail >= VEDRV_MAP_BAR2_OFFSET &&
-		   tail < VEDRV_MAP_BAR2_OFFSET + vedev->bar_size[2]) {
-		/* mapping range is in BAR2 */
-		*bar = 2;
-		return head - VEDRV_MAP_BAR2_OFFSET;
-	} else if (head >= VEDRV_MAP_BAR3_OFFSET &&
-		   head < VEDRV_MAP_BAR3_OFFSET + vedev->bar_size[3] &&
-		   tail >= VEDRV_MAP_BAR3_OFFSET &&
-		   tail < VEDRV_MAP_BAR3_OFFSET + vedev->bar_size[3]) {
-		/* mapping range is in BAR3 */
-		*bar = 3;
-		return head - VEDRV_MAP_BAR3_OFFSET;
-	}
-
-	return -1;
-}
-
-/**
  * @brief mmap method of vm operation for VE driver
  *
  * @param[in] filp: file struct of mmaping
@@ -139,15 +96,20 @@ int ve_drv_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct ve_task *task = vma->vm_file->private_data;
 	struct ve_dev *vedev = task->vedev;
-	unsigned long offset, size, bar_offset;
-	int bar;
-	unsigned long flags;
+	unsigned long offset, size, bar_offset, flags;
+	int bar, err;
 
 	vma->vm_private_data = vedev;
 
 	pdev_trace(vedev->pdev);
 
 	spin_lock_irqsave(&vedev->node->lock, flags);
+	/* block mmap device will be deleted */
+	if( vedev->remove_processing ){
+		spin_unlock_irqrestore(&vedev->node->lock, flags);
+		pdev_dbg(vedev->pdev,"device will be deleted, mmap is blocked\n");
+		return 	-ENODEV;
+	}
 	/* reject mmap when mm_struct is held */
 	if (task->mm) {
 		pdev_dbg(vedev->pdev,
@@ -169,17 +131,16 @@ int ve_drv_mmap(struct file *filp, struct vm_area_struct *vma)
 		return -EINVAL;
 	}
 
-	bar_offset = ve_map_range_offset(vedev, offset, size, &bar);
-	if (bar_offset == (unsigned long)(-1L)) {
+	BUG_ON(vedev->arch_class->ve_arch_map_range_offset == 0);
+	err = vedev->arch_class->ve_arch_map_range_offset(vedev, offset, size,
+							&bar, &bar_offset);
+	if (err !=0) {
 		pdev_dbg(vedev->pdev,
-				"invalid range: offset=0x%lx, size=0x%lx\n",
-				offset, size);
-		return -EINVAL;
+			"unmappable (%d): offset=0x%lx, size=0x%lx\n", err,
+			offset, size);
+		return err;
 	}
-	/* BAR2 mapping is limited to CAP_SYS_ADMIN */
-	if (bar == 2 && !capable(CAP_SYS_ADMIN))
-		return -EACCES;
-
+	
 	pdev_dbg(vedev->pdev,
 		"BAR%d map (offset=0x%lx, size=0x%lx) to virt addr [%p - %p]\n",
 		bar, bar_offset, size,
@@ -232,96 +193,64 @@ static void ve_vm_close(struct vm_area_struct *vma)
 }
 
 /**
- * @brief Return if mapping of this page is permitted or not
+ * @brief check the current task may use PCIATB entry
  *
- * @param[in] vedev: VE device structure
- * @param bar: BAR number (0, 2, 3)
- * @param bar_offset: offset from top of BAR.
+ * @param vedev: VE device
+ * @param entry: PCIATB entry number
  *
- * @return 0 if mapping is permitted.
- *         Negative if mapping is not permitted.
+ * @return 0 if current is permitted to map the area corresponding to the entry.
+ *         Negative if current is not permitted to map the area.
  */
-static int ve_map_is_permitted(struct ve_dev *vedev, int bar, off_t bar_offset)
+int ve_drv_check_pciatb_entry_permit(const struct ve_dev *vedev, int entry)
 {
 	struct ve_node *node = vedev->node;
-	kuid_t kuid = current_uid();
 	struct list_head *ptr, *head;
 	struct ve_kuid_list *uid_list;
-	off_t aligned_offset;
-	int entry;
-	uint64_t pciatba;
-	uint32_t pciatb_pagesize;
+	kuid_t kuid = current_uid();
 
 	pdev_trace(vedev->pdev);
 
-	/*
-	 * ADMIN is always allowed to map any area.
-	 * BAR2 check was already done.
-	 */
-	if (capable(CAP_SYS_ADMIN) || bar == 2)
-		return 0;
-
-	if (bar == 0) {
-		/* Refresh PCIATB pagesize */
-		ve_bar2_read64(vedev, PCI_BAR2_SCR_OFFSET + CREG_PCIATBA_OFFSET,
-				&pciatba);
-		if (pciatba & 1)
-			pciatb_pagesize = PCIATB_64M_PAGE;
-		else
-			pciatb_pagesize = PCIATB_2M_PAGE;
-
-		/* calc PCIATB pagesize aligned address */
-		aligned_offset = bar_offset
-			- (bar_offset % (pciatb_pagesize));
-
-		/* calc PCIATB entry number */
-		entry = aligned_offset / (pciatb_pagesize);
-
-		pdev_dbg(vedev->pdev, "VE memory mapping, pagesize = %x\n",
-				pciatb_pagesize);
-		pdev_dbg(vedev->pdev,
-		"bar_offset = %lx, aligned_offset = %lx, PCIATB entry = %d\n",
-				bar_offset, aligned_offset, entry);
-
-		head = &node->mem_map[entry]->list;
-
-		mutex_lock(&node->pcimap_mutex);
-		list_for_each(ptr, head) {
-			uid_list = list_entry(ptr, struct ve_kuid_list,
-					list);
-			if (uid_eq(uid_list->kuid, kuid)) {
-				mutex_unlock(&node->pcimap_mutex);
-				return 0;
-			}
+	head = &node->mem_map[entry]->list;
+	mutex_lock(&node->pcimap_mutex);
+	list_for_each (ptr, head) {
+		uid_list = list_entry(ptr, struct ve_kuid_list, list);
+		if (uid_eq(uid_list->kuid, kuid)) {
+			mutex_unlock(&node->pcimap_mutex);
+			return 0;
 		}
-		mutex_unlock(&node->pcimap_mutex);
-	} else if (bar == 3) {
-		/* calc 8k aligned address */
-		aligned_offset = bar_offset - (bar_offset % (2 * 4096));
-
-		/* calc CR page number */
-		entry = aligned_offset / 2 / 4096;
-
-		pdev_dbg(vedev->pdev, "CR mapping\n");
-
-		pdev_dbg(vedev->pdev,
-		"bar_offset = %lx, aligned_offset = %lx, page num = %d\n",
-				bar_offset, aligned_offset, entry);
-
-		head = &node->cr_map[entry]->list;
-
-		mutex_lock(&node->crmap_mutex);
-		list_for_each(ptr, head) {
-			uid_list = list_entry(ptr, struct ve_kuid_list,
-					list);
-			if (uid_eq(uid_list->kuid, kuid)) {
-				mutex_unlock(&node->crmap_mutex);
-				return 0;
-			}
-		}
-		mutex_unlock(&node->crmap_mutex);
 	}
+	mutex_unlock(&node->pcimap_mutex);
+	return -1;
+}
 
+/**
+ * @brief check the current task may map CR area
+ *
+ * @param vedev: VE device
+ * @param entry: CR page entry number
+ *
+ * @return 0 if current is permitted to map the area corresponding to the entry.
+ *         Negative if current is not permitted to map the area.
+ *
+ */
+int ve_drv_check_cr_entry_permit(const struct ve_dev *vedev, int entry)
+{
+	struct ve_node *node = vedev->node;
+	struct list_head *ptr, *head;
+	struct ve_kuid_list *uid_list;
+	kuid_t kuid = current_uid();
+
+	pdev_trace(vedev->pdev);
+	head = &node->cr_map[entry]->list;
+	mutex_lock(&node->crmap_mutex);
+	list_for_each (ptr, head) {
+		uid_list = list_entry(ptr, struct ve_kuid_list, list);
+		if (uid_eq(uid_list->kuid, kuid)) {
+		  mutex_unlock(&node->crmap_mutex);
+		  return 0;
+		}
+	}
+	mutex_unlock(&node->crmap_mutex);
 	return -1;
 }
 
@@ -347,7 +276,9 @@ static int ve_vm_fault(struct vm_fault *vmf)
 static vm_fault_t ve_vm_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
+#if (RHEL_RELEASE_VERSION(8,2) <= RHEL_RELEASE_CODE)
 	vm_fault_t fault_reason;
+#endif
 #endif
 	unsigned long offset, bar_offset, pfn;
 	int err;
@@ -358,8 +289,9 @@ static vm_fault_t ve_vm_fault(struct vm_fault *vmf)
 	pdev_trace(vedev->pdev);
 
 	offset = vmf->pgoff << PAGE_SHIFT;
-	bar_offset = ve_map_range_offset(vedev, offset, PAGE_SIZE, &bar);
-	if (bar_offset == (unsigned long)(-1L)) {
+	err = vedev->arch_class->ve_arch_map_range_offset(vedev,offset,
+					PAGE_SIZE, &bar, &bar_offset);
+	if (err != 0) {
 		pdev_dbg(vedev->pdev, "fault at invalid offset: offset=0x%lx\n",
 		       offset);
 #if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
@@ -383,7 +315,7 @@ static vm_fault_t ve_vm_fault(struct vm_fault *vmf)
 	 * BAR0 and BAR3 security check
 	 * and return VM_FAULT_SIGBUS if it is not permitted.
 	 */
-	err = ve_map_is_permitted(vedev, bar, bar_offset);
+	err = vedev->arch_class->permit_to_map(vedev, bar, bar_offset);
 	if (err)
 		return VM_FAULT_SIGBUS;
 #if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)

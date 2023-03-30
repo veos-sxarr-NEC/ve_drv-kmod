@@ -37,83 +37,15 @@
 #include "vp.h"
 #endif
 
+#if defined(_VE_ARCH_VE3_)
+#include <ve_drv_ve3.h>
+#elif defined(_VE_ARCH_VE1_)
+#include <ve_drv_ve1.h>
+#endif
+
 #define VEDRV_ABI_VERSION	(101)
 
-/*
- * Offset and size information for mmap
- *
- *      offset
- *          0 +------------------+
- *            | BAR3             |
- *    0M+BAR3 +------------------+
- *            | RFU (not in use) |
- *       256M +------------------+
- *            | BAR2             |
- *  256M+BAR2 +------------------+
- *            | RFU (not in use) |
- *       512M +------------------+
- *            | BAR0             |
- *  512M+BAR0 +------------------+
- */
-#define VEDRV_MAP_BAR3_OFFSET	(0x00000000)
-#define VEDRV_MAP_BAR2_OFFSET	(0x10000000)
-#define VEDRV_MAP_BAR0_OFFSET	(0x20000000)
-
-/*
- * SVR Mapping offsets from BAR2
- *
- * offset
- *     0 +------------------+
- *       | Core  0 User Reg |
- *  512K +------------------+
- *       | Core  0 Sys  Reg |
- *    1M +------------------+
- *       | Core  1 User Reg |
- *  1.5M +------------------+
- *       | Core  1 Sys  Reg |
- *  2.0M +------------------+
- *               ...
- * 15.5M +------------------+
- *       | Core 15 Sys  Reg |
- * 16.0M +------------------+
- *       | Common Reg       |
- * 18.0M +------------------+
- *       | Reserved         |
- * 32.0M +------------------+
- */
-
-/* Register offsets */
-#define PCI_BAR2_UREG_OFFSET	(0x0000000)	/*<! offset of user registers */
-#define PCI_BAR2_UREG_SIZE	(0x0080000)	/*<! size of user registers */
-#define PCI_BAR2_SREG_OFFSET	PCI_BAR2_UREG_SIZE	/*<!
-							 * offset of
-							 * system registers
-							 */
-#define PCI_BAR2_SREG_SIZE	PCI_BAR2_UREG_SIZE	/*<!
-							 * size of
-							 * system registers
-							 */
-#define PCI_BAR2_CREG_SIZE	(PCI_BAR2_UREG_SIZE + \
-		PCI_BAR2_SREG_SIZE)		 /*<!
-						  * size of core registers
-						  */
-#define PCI_BAR2_SCR_OFFSET	(0x1000000)	/*<! offset of
-						 *   system common registers
-						 */
-#define PCI_BAR2_SCR_SIZE	(0x0200000)	/*<! size of
-						 *   system common registers
-						 */
-
-/**
- * @brief VE node state enum
- */
-enum ve_state {
-	VE_ST_UNINITIALIZED,	/*!< Uninitialized state */
-	VE_ST_ONLINE,		/*!< Online state */
-	VE_ST_OFFLINE,		/*!< Offline state*/
-	VE_ST_MAINTENANCE,	/*!< Maintenance state */
-	VE_ST_UNAVAILABLE,	/*!< Unavailable state */
-};
+#define VEDRV_ARCH_CLASS_NAME_MAX (8)
 
 /**
  * @brief VEOS state enum
@@ -153,11 +85,11 @@ struct ve_vp_blk_release {
 };
 
 /**
- * @brief indicates MSI-X interrupt vector
+ * @brief MSI-X interrupt vector
  */
 struct ve_wait_irq {
-	uint64_t upper;		/*!< upper 64 bits of MSI-X interrupt vector */
-	uint64_t lower;		/*!< lower 64 bits of MSI-X interrupt vector */
+	uint64_t ve_irq_type;
+	/* architecture-dependent */
 };
 
 /**
@@ -172,7 +104,7 @@ struct ve_tid_core {
  * @brief Used for VEDRV_CMD_WAIT_INTR
  */
 struct ve_wait_irq_arg {
-	struct ve_wait_irq bits;	/*!< Interrupt bits to wait for */
+	struct ve_wait_irq *bits;	/*!< Interrupt bits to wait for */
 	struct timespec *timeout;	/*!< Timeout value */
 };
 
@@ -208,11 +140,20 @@ struct ve_get_host_pid {
 	pid_t namespace_pid;	/*!< The namespace pid to be converted */
 };
 
+
+/**
+ * @brief Used for VEDRV_CMD_REQEUST_OWNERSHIP/VEDRV_CMD_RELEASE_OWNERSHIP
+ */
+struct ve_ownership {
+	int cmd;	/*!< The cmd is request or release*/
+};
+
+
+
 /* ioctl magic number */
 #define VE_IOC_MAGIC	0xF5
 
 /* product version */
-#define VEDRV_CMD_UPDATE_FIRMWARE	_IO(VE_IOC_MAGIC, 0)
 #define VEDRV_CMD_WAIT_INTR		_IOWR(VE_IOC_MAGIC, 1, \
 						struct ve_wait_irq_arg)
 #define VEDRV_CMD_WAIT_EXCEPTION	_IOW(VE_IOC_MAGIC, 2, uint64_t)
@@ -239,7 +180,7 @@ struct ve_get_host_pid {
 						struct ve_vp_release)
 #define VEDRV_CMD_DELETE_ALL_TASK	_IO(VE_IOC_MAGIC, 17)
 #define VEDRV_CMD_RST_INTR_COUNT	_IOR(VE_IOC_MAGIC, 18, uint64_t)
-#define VEDRV_CMD_VE_RESET		_IOR(VE_IOC_MAGIC, 19, uint64_t)
+#define VEDRV_CMD_VE_VE_RESET		_IOR(VE_IOC_MAGIC, 19, uint64_t)
 #define VEDRV_CMD_REVIVE_TASK		_IOR(VE_IOC_MAGIC, 20, pid_t)
 #define VEDRV_CMD_HOST_PID		_IOR(VE_IOC_MAGIC, 21, struct ve_get_host_pid)
 #define VEDRV_CMD_VHVA_TO_VSAA_BLK	_IOWR(VE_IOC_MAGIC, 22, struct ve_vp_blk)
@@ -248,4 +189,14 @@ struct ve_get_host_pid {
 						struct ve_vp_blk_release)
 #define VEDRV_CMD_COUNT_PD_PAGE_ALL	_IOR(VE_IOC_MAGIC, 25, \
 						struct ve_vp_release)
+
+#define VEDRV_CMD_OWNERSHIP	        _IOR(VE_IOC_MAGIC, 26,	\
+						struct ve_ownership)
+
+///****
+#define VEDRV_CMD_NOTIFY_FAULT	        _IO(VE_IOC_MAGIC, 27)
+#define VEDRV_CMD_GET_EXS_REG           _IOW(VE_IOC_MAGIC, 28, uint64_t)
+#define VEDRV_CMD_COMPLETE_MEMCLEAR     _IO(VE_IOC_MAGIC, 29)
+#define VEDRV_CMD_HANDLE_CLOCK_GATING   _IOR(VE_IOC_MAGIC, 30, int)
+#define VEDRV_CMD_GET_CLOCK_GATING_STATE     _IOW(VE_IOC_MAGIC, 31, uint64_t)
 #endif /*VE_DRV_H_INCLUDE_*/

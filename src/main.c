@@ -1,7 +1,7 @@
 /*
  * Vector Engine Driver
  *
- * Copyright (C) 2017-2018 NEC Corporation
+ * Copyright (C) 2017-2020 NEC Corporation
  * This file is part of VE Driver.
  *
  * VE Driver is free software; you can redistribute it and/or
@@ -25,37 +25,35 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/version.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/moduleparam.h>
 #include <linux/kthread.h>
 #include <linux/cdev.h>
-#include <linux/fs.h>
-#include <linux/file.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/wait.h>
-#include <linux/mm.h>
 #include <linux/init.h>
-#include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/aer.h>
 #include <linux/idr.h>
 #include <linux/dma-mapping.h>
 #include <linux/vmalloc.h>
+#include <linux/kref.h>
+#include <linux/sched/signal.h>
 #include "../config.h"
 #include "commitid.h"
 #include "ve_drv.h"
 #include "internal.h"
-
+#include "mmio.h"
 #define VE_MAX_DEVICES         (1U << MINORBITS)
 #define VE_REMOVE_TIMEOUT_MSECS	40
 
 /* static strings */
 char ve_driver_name[] = "ve_drv";
 static const char ve_driver_string[] = "NEC Vector Engine Driver";
-static const char ve_copyright[] = "Copyright (c) 2017-2018 NEC Corporation.";
+static const char ve_copyright[] = "Copyright (c) 2020 NEC Corporation.";
 static int ve_major;
 static DEFINE_IDR(ve_idr);
 /* Protect idr accesses */
@@ -76,8 +74,19 @@ static void ve_pci_remove(struct pci_dev *dev);
  * @brief PCI Device ID table
  */
 static const struct pci_device_id ve_device_table[] = {
-	{PCI_DEVICE(PCI_VENDOR_ID_VE, PCI_DEVICE_ID_VE)},
-	{0,},
+	{PCI_DEVICE(PCI_VENDOR_ID_VE1, PCI_DEVICE_ID_VE1)},
+	{PCI_DEVICE(PCI_VENDOR_ID_VE3, PCI_DEVICE_ID_VE3_EMULATOR)},
+	{PCI_DEVICE(PCI_VENDOR_ID_VE3, PCI_DEVICE_ID_VE3)},{0,},
+};
+
+typedef const struct ve_arch_class *ve_arch_probe_func_t(struct ve_dev *);
+/**
+ * @brief VE model/type probe functions
+ */
+static ve_arch_probe_func_t *ve_arch_probe_table[] = {
+	ve_arch_probe_ve1,
+	ve_arch_probe_ve3,
+	0,
 };
 
 /**
@@ -101,6 +110,27 @@ static const struct file_operations ve_fops = {
 	.release = ve_drv_release,
 	.owner = THIS_MODULE,
 };
+
+/**
+ * @brief Probe VE architecture model/type
+ *
+ */
+const struct ve_arch_class *ve_drv_probe_arch_class(struct ve_dev *vedev)
+{
+	const struct ve_arch_class *ret;
+	struct pci_dev *pdev = vedev->pdev;
+	ve_arch_probe_func_t **p;
+	for (p = ve_arch_probe_table; *p; ++p) {
+		ret = (**p)(vedev);
+		if (ret > 0) {
+			pdev_dbg(pdev, "probe succeeded (%s)\n",
+				ret->name);
+			return ret;
+		}
+	}
+	pdev_err(pdev, "arch probe failure: no arch type matched\n");
+	return NULL;
+}
 
 /**
  * @brief Make VE chardev be able to be accessed by any user.
@@ -148,17 +178,6 @@ int wait_after_vereset_sec = 16;	/* 15sec by default */
 module_param(wait_after_vereset_sec, int, 0600);
 MODULE_PARM_DESC(wait_after_vereset_sec, "wait time after vereset value in sec");
 
-/* FPGA init parameters */
-static int hw_skip_fpga_init;
-module_param(hw_skip_fpga_init, int, 0600);
-MODULE_PARM_DESC(hw_skip_fpga_init,
-		 "If this parameter is not zero, driver will skip FPGA initialization.");
-
-/* Skip FW update in probe */
-static int skip_fw_update;
-module_param(skip_fw_update, int, 0600);
-MODULE_PARM_DESC(skip_fw_update,
-		 "If this parameter is not zero, driver will skip FW Update in probe.");
 
 /* Overwrite number of cores */
 static int ow_num_of_core;
@@ -172,31 +191,33 @@ module_param(ow_core_enables, int, 0600);
 MODULE_PARM_DESC(ow_core_enables,
 		 "If this parameter is not zero, driver will overwrite enabled VE cores.");
 
+/* clear INTVEC on PCI access exception */
+int clear_intvec_pci_access_exception;
+module_param(clear_intvec_pci_access_exception, int, 0600);
+MODULE_PARM_DESC(clear_intvec_pci_access_exception,
+                 "If this parameter is not zero, driver will clear INTVEC on PCI access exception (MSI-X 34).");
 
-static int ve_enable_irqs(struct ve_dev *vedev);
+int panic_on_pci_access_exception;
+module_param(panic_on_pci_access_exception, int, 0600);
+MODULE_PARM_DESC(panic_on_pci_access_exception,
+                 "If this parameter is not zero, driver will panic on PCI access exception (MSI-X 34).");
 
-/**
- * @brief Check if the PCI device is VE-FPGA
- *
- * @param[in] pdev: PCI device structure
- *
- * @return true on FPGA. false on ASIC.
- */
-static int ve_device_is_fpga(struct pci_dev *pdev)
-{
-	struct ve_dev *vedev = pci_get_drvdata(pdev);
-	struct ve_hw_info *info = &vedev->node->hw_info;
+int wait_sec_after_sigterm_on_remove=10;
+module_param(wait_sec_after_sigterm_on_remove, int, 0600);
+MODULE_PARM_DESC(wait_sec_after_sigterm_on_remove,
+                 "This parameter is wait time after send sigterm on remove function.");
 
-	pdev_trace(vedev->pdev);
+int wait_sec_after_sigkill_on_remove=5;
+module_param(wait_sec_after_sigkill_on_remove, int, 0600);
+MODULE_PARM_DESC(wait_sec_after_sigkill_on_remove,
+                 "This parameter is wait time after send sigkill on remove function.");
 
-	if (info->model == QEMU_MODEL_0)
-		return false;
+int wait_sec_after_sigkill_on_notify_fault=10;
+module_param(wait_sec_after_sigkill_on_notify_fault, int, 0600);
+MODULE_PARM_DESC(wait_sec_after_sigkill_on_notify_fault,
+                 "This parameter is wait time after send sigkill on notify fault function.");
 
-	if (info->model >= 0x64)
-		return true;
 
-	return false;
-}
 
 /**
  * @brief Initialize PCI config register
@@ -252,6 +273,7 @@ static void ve_drv_del_ve_node(struct ve_dev *vedev)
 	for (entry = 0; entry < node->model_info.num_of_crpage; entry++)
 		kfree(node->cr_map[entry]);
 	kfree(node->cr_map);
+	vedev->arch_class->fini_node(vedev, node);
 
 	vfree(node);
 }
@@ -272,134 +294,6 @@ static void ve_drv_fini_ve_core(struct ve_dev *vedev)
 	kfree(node->core);
 }
 
-static int ve_read_ve_config_regs(struct ve_dev *vedev, u32 *data)
-{
-	struct pci_dev *dev = vedev->pdev;
-	int i;
-	int addr;
-	int ret;
-	u32 *data_p;
-
-	data_p = data;
-	addr = PCI_CONFIG_VE_CONFIG_REGS_OFFSET;
-
-	for (i = 0; i < VCR_SIZE; i++) {
-		ret = pci_read_config_dword(dev, addr, &data_p[i]);
-		if (ret < 0) {
-			pdev_err(vedev->pdev,
-				"Failed to read PCI config (addr = 0x%x)\n",
-				addr);
-			return -1;
-		}
-		addr += sizeof(u32);
-	}
-
-	return 0;
-}
-
-static int ve_drv_fill_hw_info(struct ve_dev *vedev)
-{
-	struct ve_hw_info *info = &vedev->node->hw_info;
-	struct pci_dev *pdev = vedev->pdev;
-	u32 data[VCR_SIZE];
-	int ret;
-
-	ret = ve_read_ve_config_regs(vedev, data);
-	if (ret)
-		return -1;
-
-	info->model = (uint8_t)((data[0] & 0xff000000) >> 24);
-	info->type = (uint8_t)((data[0] & 0x00ff0000) >> 16);
-	info->cpu_version = (uint8_t)((data[0] & 0x0000ff00) >> 8);
-	info->version = (uint8_t)(data[0] & 0x000000ff);
-	info->num_of_core = (uint8_t)((data[1] & 0xff000000) >> 24);
-	info->core_enables = data[1] & 0x00ffffff;
-	info->chip_sn[0] = (uint64_t)data[2] << 32;
-	info->chip_sn[0] |= (uint64_t)data[3];
-	info->chip_sn[1] = (uint64_t)data[4] << 32;
-	info->chip_sn[1] |= (uint64_t)data[5];
-	info->board_sn[0] = (uint64_t)data[6] << 32;
-	info->board_sn[0] |= (uint64_t)data[7];
-	info->board_sn[1] = (uint64_t)data[8] << 32;
-	info->board_sn[1] |= (uint64_t)data[9];
-	info->vmcfw_version = (uint16_t)(data[10] & 0x0000ffff);
-	info->memory_size = (uint16_t)((data[11] & 0xffff0000) >> 16);
-	info->memory_clock = (uint16_t)(data[11] & 0x0000ffff);
-	info->core_clock = (uint16_t)((data[12] & 0xffff0000) >> 16);
-	info->base_clock = (uint16_t)(data[12] & 0x0000ffff);
-
-	/*
-	 * Currently memory size of FPGA is not filled in PCI config.
-	 * Manually set here.
-	 */
-	if (ve_device_is_fpga(pdev))
-		info->memory_size = (uint16_t)FPGA_MEM_SIZE;
-
-	/* FIXME: this is workaround of HW problem */
-	if (ow_core_enables)
-		info->core_enables = ow_core_enables;
-	if (ow_num_of_core)
-		info->num_of_core = ow_num_of_core;
-
-	pdev_dbg(pdev, "model = 0x%x\n", info->model);
-	pdev_dbg(pdev, "type = 0x%x\n", info->type);
-	pdev_dbg(pdev, "cpu_version = 0x%x\n", info->cpu_version);
-	pdev_dbg(pdev, "version = 0x%x\n", info->version);
-	pdev_dbg(pdev, "num_of_core = 0x%x\n", info->num_of_core);
-	pdev_dbg(pdev, "core_enables = 0x%06x\n", info->core_enables);
-	pdev_dbg(pdev, "chip_sn[0] = 0x%016llx\n", info->chip_sn[0]);
-	pdev_dbg(pdev, "chip_sn[1] = 0x%016llx\n", info->chip_sn[1]);
-	pdev_dbg(pdev, "board_sn[0] = 0x%016llx\n", info->board_sn[0]);
-	pdev_dbg(pdev, "board_sn[1] = 0x%016llx\n", info->board_sn[1]);
-	pdev_dbg(pdev, "vmcfw_version = 0x%x\n", info->vmcfw_version);
-	pdev_dbg(pdev, "memory_size = 0x%x\n", info->memory_size);
-	pdev_dbg(pdev, "memory_clock = 0x%x\n", info->memory_clock);
-	pdev_dbg(pdev, "core_clock = 0x%x\n", info->core_clock);
-	pdev_dbg(pdev, "base_clock = 0x%x\n", info->base_clock);
-
-	/* TODO(TBD): check if every value is valid */
-	if (!info->num_of_core) {
-		pdev_err(pdev,
-			"PCI config value num_of_core is invalid (%d)\n",
-				info->num_of_core);
-		return -1;
-	}
-	if (!info->core_enables) {
-		pdev_err(pdev,
-			"PCI config value core_enables is invalid (%d)\n",
-				info->core_enables);
-		return -1;
-	}
-	if (!info->memory_size) {
-		pdev_err(pdev,
-			"PCI config value memory_size is invalid (%d)\n",
-				info->memory_size);
-		return -1;
-	}
-
-	return 0;
-}
-
-static void ve_drv_fill_model_info(struct ve_dev *vedev)
-{
-	struct ve_hw_info *info = &vedev->node->hw_info;
-	struct ve_model_info *model = &vedev->node->model_info;
-
-	switch (info->model) {
-		/*
-		 * TODO(TBD): fill info by each model
-		 */
-	default:
-		model->num_of_crpage = FPGA_CR_PAGE;
-		model->num_of_pciatb = FPGA_PCIATB_ENTRY;
-		model->i_cache_size = 32; /* 32 KiB */
-		model->d_cache_size = 32; /* 32 KiB */
-		model->l2_cache_size = 256; /* 256 KiB */
-		model->l3_cache_size = 16*1024; /* 16 MiB */
-
-	}
-}
-
 /**
  * @brief Allocate VE node structure and initialize it
  *
@@ -417,19 +311,30 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 	node = vzalloc(sizeof(struct ve_node));
 	if (!node)
 		return -ENOMEM;
-
+	node->sensor_rawdata = kzalloc(vedev->arch_class->num_sensors *
+				sizeof(node->sensor_rawdata[0]), GFP_KERNEL);
+	if (!node->sensor_rawdata){
+	        ret = -ENOMEM;
+		goto err_alloc_sensor_rawdata;
+	}	
+	node->ve_archdep_data = kzalloc(vedev->arch_class->ve_archdep_size,
+					GFP_KERNEL);
+	if (!node->ve_archdep_data){
+	        ret = -ENOMEM;
+		goto err_alloc_archdep_data;
+	}
 	vedev->node = node;
 	node->online_jiffies = -1;
 
-	ret = ve_drv_fill_hw_info(vedev);
-	if (ret){
-		vedev->node = NULL;
-		kfree(node);
-		return -1;
-	}
+	BUG_ON(vedev->arch_class->fill_hw_info == 0);
+	ret = vedev->arch_class->fill_hw_info(vedev);
+	if (ret)
+		goto err_fill_hw_info;
+
 	node->core_fls = fls(node->hw_info.core_enables);
 	pdev_dbg(vedev->pdev, "core_fls = 0x%x\n", node->core_fls);
-	ve_drv_fill_model_info(vedev);
+	BUG_ON(vedev->arch_class->fill_model_info == 0);
+	vedev->arch_class->fill_model_info(vedev, &vedev->node->model_info);
 
 	spin_lock_init(&node->lock);
 	mutex_init(&node->sysfs_mutex);
@@ -440,9 +345,6 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 	}
 
 	init_waitqueue_head(&node->waitq);
-	node->cond.upper = 0;
-	node->cond.lower = 0;
-
 	/* Initialize CR page assign list */
 	mutex_init(&node->crmap_mutex);
 	node->cr_map = kmalloc_array(node->model_info.num_of_crpage,
@@ -479,15 +381,24 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 		INIT_LIST_HEAD(&node->mem_map[entry]->list);
 	}
 
-	node->ve_state = VE_ST_UNINITIALIZED;
 	node->os_state = OS_ST_OFFLINE;
+
+	node->ownership = NULL;
+	node->notifyfaulter = NULL;
 #ifdef VE_DRV_DEBUG
 	node->sysfs_crpage_entry = 0;
 	node->sysfs_pciatb_entry = 0;
 #endif
+	if (vedev->arch_class->init_node) {
+		ret = vedev->arch_class->init_node(vedev, node);
+		if (ret != 0) {
+			goto err_arch_init_node;
+		}
+	}
 
 	return ret;
 
+ err_arch_init_node:
  err_mem_map_for:
 	for (free_element = 0; free_element < entry; free_element++)
 		kfree(node->mem_map[free_element]);
@@ -499,8 +410,14 @@ static int ve_drv_init_ve_node(struct ve_dev *vedev)
 		kfree(node->cr_map[free_element]);
 	kfree(node->cr_map);
  err_cr_map:
+ err_fill_hw_info:
+	kfree(node->ve_archdep_data);
+ err_alloc_archdep_data:
+	kfree(node->sensor_rawdata);
+ err_alloc_sensor_rawdata:
+	vfree(node);
 	vedev->node = NULL;
-	kfree(node);
+
 	return ret;
 }
 
@@ -511,8 +428,11 @@ int ve_init_exsrar(struct ve_dev *vedev)
 	int noc = vedev->node->core_fls;
 	int core_id;
 	void *exsrar_reg_addr;
-	off_t exsrar_offset;
 	uint64_t exsrar_val;
+
+	void *(*exsrar_addr_func)(const struct ve_dev *, int);
+	exsrar_addr_func = vedev->arch_class->exsrar_addr;
+	BUG_ON(exsrar_addr_func == 0);
 
 	for (core_id = 0; core_id < noc; core_id++) {
 		if (node->core[core_id]->exs != 0) {
@@ -523,10 +443,7 @@ int ve_init_exsrar(struct ve_dev *vedev)
 			return -1;
 		}
 
-		exsrar_offset = PCI_BAR2_UREG_OFFSET +
-			(PCI_BAR2_CREG_SIZE * core_id) +
-			PCI_BAR2_SREG_OFFSET + SREG_EXSRAR_OFFSET;
-		exsrar_reg_addr = vedev->bar[2] + exsrar_offset;
+		exsrar_reg_addr = exsrar_addr_func(vedev, core_id);
 		exsrar_val = (uint64_t)(vedev->pdma_addr) +
 			(sizeof(uint64_t) * core_id);
 
@@ -652,16 +569,17 @@ static unsigned long ve_get_bar_size(struct ve_dev *dev, int bar)
 /**
  * @brief Core interrupt handler
  *
- * @param entry: MSI-X interrupt entry
  * @param[in] pdev: pointer to a pci_dev structure
+ * @param core_id: core_id
+ * @param irq_handled_cb: callback when the core interrupt is handled.
+ *                        node->lock in ve_dev is held on callback.
  *
  * @return IRQ_HANDLED
  */
-static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
+irqreturn_t ve_drv_generic_core_intr(struct ve_dev *vedev, int core_id,
+			void (*irq_handled_cb)(struct ve_dev *, int))
 {
-	struct ve_dev *vedev = pci_get_drvdata(pdev);
 	struct ve_node *node;
-	int core_id = entry;
 	unsigned long flags;
 
 	pdev_trace(vedev->pdev);
@@ -671,8 +589,8 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 	/* HW configuration BUG */
 	if (unlikely(core_id >= node->core_fls)) {
 		pdev_err(vedev->pdev,
-		"HW configuration BUG: entry = %d, core_enables = 0x%x\n",
-			entry, node->hw_info.core_enables);
+		"HW configuration BUG: core_id = %d, core_enables = 0x%lx\n",
+			core_id, (unsigned long)node->hw_info.core_enables);
 		return IRQ_HANDLED;
 	}
 
@@ -686,16 +604,13 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 	if (node->core[core_id]->task != NULL) {
 		node->core[core_id]->task->wait_cond = 1;
 		wake_up_interruptible(&node->core[core_id]->task->waitq);
-		goto clear_intvec;
+		goto callback;
 	}
 	pdev_dbg(vedev->pdev, "no task to be awaken (core %d count = %d)\n",
 	       core_id, node->core[core_id]->count);
 
- clear_intvec:
-	/* Clear Interrupt Vector Register */
-	ve_bar2_write64_20(vedev,
-			PCI_BAR2_SCR_OFFSET + CREG_INTERRUPT_VECTOR,
-			(uint64_t)0x8000000000000000 >> core_id);
+ callback:
+	irq_handled_cb(vedev, core_id);
 
 	spin_unlock_irqrestore(&vedev->node->lock, flags);
 
@@ -703,37 +618,29 @@ static irqreturn_t ve_core_intr(int entry, struct pci_dev *pdev)
 }
 
 /**
- * @brief DMA and error interrupt handler
+ * @brief Generic node interrupt handler
  *
- * @param entry: MSI-X interrupt entry
+ * Invoke a specified callback and wake up a process on node wait queue
+ *
  * @param[in] pdev: pointer to a pci_dev structure
+ * @param irq_handled_cb: callback
+ *                        node->lock in ve_dev is held on callback.
  *
  * @return IRQ_HANDLED
  */
-static irqreturn_t ve_intr_notify(int entry, struct pci_dev *pdev)
+irqreturn_t ve_drv_generic_node_intr(struct ve_dev *vedev, int entry,
+		void (*irq_handled_cb)(struct ve_dev *, int entry))
 {
-	struct ve_dev *vedev = pci_get_drvdata(pdev);
 	struct ve_node *node = vedev->node;
-	uint64_t cond_bit = 0;
 	unsigned long flags;
 
 	pdev_trace(vedev->pdev);
-
-	/* set condition bit */
 	spin_lock_irqsave(&node->lock, flags);
-	if (entry < 64) {
-		cond_bit = 0x1ULL << entry;
-		node->cond.lower |= cond_bit;
-	} else {
-		entry -= 64;
-		cond_bit = 0x1ULL << entry;
-		node->cond.upper |= cond_bit;
-	}
+	irq_handled_cb(vedev, entry);
 	spin_unlock_irqrestore(&node->lock, flags);
-
 	/* wake up */
 	wake_up_interruptible(&node->waitq);
-
+	
 	return IRQ_HANDLED;
 }
 
@@ -757,14 +664,6 @@ inline int ve_msix_vec_to_entry(int irq, struct ve_dev *vedev)
 	return -1;
 }
 
-static void dump_hw_error_log(struct ve_dev *vedev, int entry)
-{
-	struct pci_dev *pdev = vedev->pdev;
-
-	if (entry != 0xff)
-		pdev_err(pdev, "HW Error occurred (Entry = %d)\n", entry);
-}
-
 /**
  * @brief Generic interrupt handler
  *
@@ -781,17 +680,7 @@ static irqreturn_t ve_intr(int irq, void *arg)
 
 	entry = ve_msix_vec_to_entry(irq, vedev);
 	pdev_dbg(vedev->pdev, "Entry = %d\n", entry);
-
-	if (unlikely(entry < 0 || 95 < entry))
-		return IRQ_HANDLED;
-
-	if (unlikely(entry > 63))
-		dump_hw_error_log(vedev, entry);
-
-	if (entry < 16 && likely(!hw_intr_test_param))
-		return ve_core_intr(entry, pdev);
-
-	return ve_intr_notify(entry, pdev);
+	return vedev->arch_class->ve_arch_intr(vedev, entry);
 }
 
 /**
@@ -799,7 +688,7 @@ static irqreturn_t ve_intr(int irq, void *arg)
  *
  * @param[in] vedev VE device structure
  */
-static void ve_disable_irqs(struct ve_dev *vedev)
+void ve_drv_disable_irqs(struct ve_dev *vedev)
 {
 	int entry;
 	struct pci_dev *pdev;
@@ -893,119 +782,26 @@ static void ve_unmap_bar(struct ve_dev *dev)
 
 static void ve_drv_stop_all_cores_dmas(struct ve_dev *dev)
 {
-	struct ve_hw_info *info = &dev->node->hw_info;
 	struct pci_dev *pdev = dev->pdev;
-	int core_id;
-	off_t offset;
-	uint64_t regdata;
 	unsigned long to_jiffies;
-
+	int stopped;
 	pdev_trace(pdev);
-	/*
-	 * STOP all the cores and DMAs
-	 */
-	offset = PCI_BAR2_SCR_OFFSET + CREG_DMACTLP_OFFSET;
-	ve_bar2_write64(dev, offset, DMACTL_DISABLE_PERMIT);
 
-	for (core_id = 0; core_id < dev->node->core_fls; core_id++) {
-		if (!(info->core_enables & (1 << core_id)))
-			continue;
+	BUG_ON(dev->arch_class->request_stop_all == 0);
+	BUG_ON(dev->arch_class->check_stopped == 0);
 
-		/* Set core register offset */
-		offset = PCI_BAR2_UREG_OFFSET +
-			PCI_BAR2_CREG_SIZE * core_id;
-
-		/* STOP the user DMA (Host) */
-		ve_bar2_write64(dev, offset +
-				PCI_BAR2_SREG_OFFSET +
-				SREG_DMACTLH_OFFSET,
-				DMACTL_DISABLE_PERMIT);
-
-		/* STOP the user DMA (Device) */
-		ve_bar2_write64(dev, offset +
-				PCI_BAR2_SREG_OFFSET +
-				SREG_DMACTLE_OFFSET,
-				DMACTL_DISABLE_PERMIT);
-
-		/* STOP the core */
-		ve_bar2_write64(dev, offset +
-				PCI_BAR2_UREG_OFFSET +
-				UREG_EXS_OFFSET,
-				EXS_STATE_STOP);
-	}
+	dev->arch_class->request_stop_all(dev);
 
 	to_jiffies = jiffies + msecs_to_jiffies(VE_REMOVE_TIMEOUT_MSECS);
-	/*
-	 * Check if all the cores and all the DMAs are stopped
-	 */
-	offset = PCI_BAR2_SCR_OFFSET + CREG_DMACTLP_OFFSET;
+
 	do {
-		ve_bar2_read64(dev, offset, &regdata);
-		if (regdata & DMACTL_HALT_MASK)
+		stopped = dev->arch_class->check_stopped(dev);
+		if (stopped)
 			break;
 		if (time_after(jiffies, to_jiffies)) {
-			pdev_dbg(pdev, "PDMA stop timed out (0x%llx)\n",
-					regdata);
 			goto force_stop;
 		}
 	} while (1);
-
-	for (core_id = 0; core_id < dev->node->core_fls; core_id++) {
-		if (!(info->core_enables & (1 << core_id)))
-			continue;
-
-		/* Set core register offset */
-		offset = PCI_BAR2_UREG_OFFSET + PCI_BAR2_CREG_SIZE * core_id;
-
-		/* Check the user DMA (Host) */
-		do {
-			ve_bar2_read64(dev, offset +
-					PCI_BAR2_SREG_OFFSET +
-					SREG_DMACTLH_OFFSET,
-					&regdata);
-			if (regdata & DMACTL_HALT_MASK)
-				break;
-			if (time_after(jiffies, to_jiffies)) {
-				pdev_dbg(pdev,
-				"Core %d UDMAH stop timed out (0x%llx)\n",
-				core_id, regdata);
-				goto force_stop;
-			}
-		} while (1);
-
-		/* Check the user DMA (Device) */
-		do {
-			ve_bar2_read64(dev, offset +
-					PCI_BAR2_SREG_OFFSET +
-					SREG_DMACTLE_OFFSET,
-					&regdata);
-			if (regdata & DMACTL_HALT_MASK)
-				break;
-			if (time_after(jiffies, to_jiffies)) {
-				pdev_dbg(pdev,
-				"Core %d UDMAE stop timed out (0x%llx)\n",
-				core_id, regdata);
-				goto force_stop;
-			}
-		} while (1);
-
-		/* Check the core */
-		do {
-			ve_bar2_read64(dev, offset +
-					PCI_BAR2_UREG_OFFSET +
-					UREG_EXS_OFFSET,
-					&regdata);
-			if (!(regdata & EXS_STATE_RUN))
-				break;
-			if (time_after(jiffies, to_jiffies)) {
-				pdev_dbg(pdev,
-				"Core %d stop timed out (0x%llx)\n",
-				core_id, regdata);
-				goto force_stop;
-			}
-		} while (1);
-	}
-
 	return;
 force_stop:
 	pdev_dbg(pdev, "core and dma stop timed out\n");
@@ -1013,46 +809,92 @@ force_stop:
 }
 
 /**
- * @brief Check if the PCI device needs firmware update
+ * @brief Enable MSI/MSI-X interrupts and request irqs.
  *
- * @param[in] pdev: PCI device structure
+ * @param[in] vedev: device to enable interrupt
  *
- * @return true if it needs update. false if it doesn't.
+ * @return 0 on success. Negative on failure.
  */
-static int ve_device_needs_firm_update(struct ve_dev *vedev)
+int ve_drv_enable_irqs(struct ve_dev *vedev)
 {
-	struct pci_dev *pdev = vedev->pdev;
-	struct pci_dev *parent = pdev->bus->self;
-	struct ve_hw_info *info = &vedev->node->hw_info;
-	u16 link_sta;
+	int entry, free_entry;
+	int err = -1;
+	struct pci_dev *pdev;
 
-	pdev_trace(pdev);
+	pdev_trace(vedev->pdev);
 
-	pcie_capability_read_word(parent, PCI_EXP_LNKSTA, &link_sta);
-	/* Skip FW update if it is already linked with Gen3 */
-	if ((link_sta & PCI_EXP_LNKSTA_CLS_8_0GB) == PCI_EXP_LNKSTA_CLS_8_0GB) {
-		pdev_dbg(pdev, "Device is already linked with Gen3\n");
-		return false;
+	pdev = vedev->pdev;
+	vedev->msix_nvecs = pci_msix_vec_count(pdev);
+	if (!(vedev->msix_nvecs)) {
+		pdev_err(pdev, "MSI-X is not available\n");
+		goto err_msix_count;
+	}
+	vedev->msix_entries = kcalloc(vedev->msix_nvecs,
+				      sizeof(struct msix_entry), GFP_KERNEL);
+	if (!(vedev->msix_entries))
+		goto err_msix_count;
+	for (entry = 0; entry < vedev->msix_nvecs; entry++)
+		vedev->msix_entries[entry].entry = entry;
+
+	/*
+	 * pci_enable_msix doesn't return positive when nvec is obtained
+	 * by pci_msix_vec_count(). So something is wrong with previous code
+	 * if this returns positive value.
+	 */
+#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
+	err = pci_enable_msix(pdev, vedev->msix_entries, vedev->msix_nvecs);
+	if (err < 0) {
+		pdev_err(pdev, "Failed to enable MSI-X\n");
+		goto err_enable_msix;
+	} else if (err > 0) {
+		pdev_err(pdev, "Failed to count MSI-X vector. (%d)\n", err);
+		err = -1;
+		goto err_enable_msix;
 	}
 
-	switch (info->model) {
-	case ASIC_MODEL_0:
-	case ASIC_MODEL_1:
-		return true;
-	case FPGA_MODEL_104:
-	case FPGA_MODEL_105:
-	case FPGA_MODEL_106:
-	case FPGA_MODEL_107:
-	case QEMU_MODEL_0:
-		return false;
-	default:
-		pdev_warn(pdev, "Unsupported Device (model = 0x%x)\n",
-				info->model);
-		return false;
+#else
+	err = pci_enable_msix_range(pdev, vedev->msix_entries, vedev->msix_nvecs,vedev->msix_nvecs);
+	if (err < 0) {
+		pdev_err(pdev, "Failed to enable MSI-X\n");
+		goto err_enable_msix;
+	} else if (err != vedev->msix_nvecs ) {
+		pdev_err(pdev, "Failed to count MSI-X vector. (%d)\n", err);
+		err = -1;
+		goto err_enable_msix;
 	}
+
+#endif
+
+	for (entry = 0; entry < vedev->msix_nvecs; entry++) {
+		err = request_irq(vedev->msix_entries[entry].vector,
+				  ve_intr, 0, ve_driver_name, pdev);
+		if (err) {
+			pdev_err(pdev, "request_irq of vector %d failed.(%d)\n",
+				 vedev->msix_entries[entry].vector, err);
+			goto err_request_irq;
+		}
+		pdev_dbg(pdev, "MSI-X is enabled. vector = %d, entry = %d\n",
+			 vedev->msix_entries[entry].vector,
+			 vedev->msix_entries[entry].entry);
+	}
+
+	return 0;
+
+ err_request_irq:
+	for (free_entry = 0; free_entry < entry; free_entry++)
+		free_irq(vedev->msix_entries[free_entry].vector, pdev);
+	pci_disable_msix(pdev);
+
+ err_enable_msix:
+	kfree(vedev->msix_entries);
+ err_msix_count:
+
+	return err;
 }
 
-static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
+
+int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap,
+					int sbr)
 {
 	struct pci_dev *pdev = vedev->pdev;
 	struct pci_dev *parent = pdev->bus->self;
@@ -1064,8 +906,8 @@ static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
 	 * Set target linkspeed of SW/RP downstream port to Gen1
 	 * before secondary bus reset
 	 */
-	if (sbr) {
-		err = ve_set_lnkctl2_target_speed(parent, 1);
+	if (sbr == 1) {
+		err = ve_drv_set_lnkctl2_target_speed(parent, 1);
 		if (err) {
 			pdev_err(pdev,
 				"Failed to set Link Control 2 Register\n");
@@ -1077,8 +919,7 @@ static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
 	 */
 	err = pcie_capability_read_word(parent, PCI_EXP_DEVCTL, aer_cap);
 	if (err) {
-		pdev_err(parent,
-				"pcie_capability_read_word failed. (%d)\n",
+		pdev_err(parent, "pcie_capability_read_word failed. (%d)\n",
 				err);
 	} else if (*aer_cap & PCI_EXP_AER_FLAGS) {
 		/* AER should be disabled temporarily if it is enabled */
@@ -1091,19 +932,19 @@ static int ve_prepare_for_link_down(struct ve_dev *vedev, u16 *aer_cap, int sbr)
 	return err;
 }
 
-static int ve_prepare_for_chip_reset(struct ve_dev *vedev, u16 *aer_cap,
+int ve_prepare_for_chip_reset(struct ve_dev *vedev, u16 *aer_cap,
 		int disable_irq, int sbr)
 {
 	pdev_trace(vedev->pdev);
 
 	/* Disable MSI-X */
 	if (disable_irq)
-		ve_disable_irqs(vedev);
+		ve_drv_disable_irqs(vedev);
 
 	return ve_prepare_for_link_down(vedev, aer_cap, sbr);
 }
 
-static int ve_check_pci_link(struct pci_dev *pdev)
+int ve_check_pci_link(struct pci_dev *pdev)
 {
 	int ret = 0;
 	u16 vendor;
@@ -1183,8 +1024,7 @@ static int pci_save_state_lnkctl2_only(struct pci_dev *dev)
 	return 0;
 }
 
-
-static int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,
+int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,
 		int fw_update, int sbr)
 {
 	struct pci_dev *pdev = vedev->pdev;
@@ -1226,7 +1066,7 @@ static int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,
 	pdev_dbg(pdev, "PCI config is restored\n");
 
 	/* Do link retraining only after FW updating */
-	if (!fw_update || sbr)
+	if (!fw_update || (sbr == 1))
 		goto train_end;
 	/* Skip if it is already linked with Gen3 */
 	pcie_capability_read_word(parent, PCI_EXP_LNKSTA, &link_sta);
@@ -1272,7 +1112,7 @@ static int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,
 		goto link_train;
 
 	pdev_info(pdev, "Gen3 link was not established. (LNKSTA = 0x%x)\n",
-		 link_sta);
+		link_sta);
  train_end:
 	/* AER config should be restored */
 	if (*aer_cap & PCI_EXP_AER_FLAGS) {
@@ -1283,263 +1123,44 @@ static int ve_recover_from_link_down(struct ve_dev *vedev, u16 *aer_cap,
 	return 0;
 }
 
-static int ve_recover_from_chip_reset(struct ve_dev *vedev, u16 *aer_cap,
-		int enable_irq, int fw_update, int sbr)
-{
-	int err;
-
-	pdev_trace(vedev->pdev);
-
-	/* Restore PCI config and link retrain to link with Gen3 */
-	err = ve_recover_from_link_down(vedev, aer_cap, fw_update, sbr);
-	if (err)
-		return err;
-
-	/* Enable MSI-X */
-	if (enable_irq) {
-		/* clear all pending interrupt bits in driver */
-		vedev->node->cond.lower = 0;
-		vedev->node->cond.upper = 0;
-
-		err = ve_enable_irqs(vedev);
-		if (err)
-			return err;
-	}
-
-	/* FPGA specific initialization */
-	if (ve_device_is_fpga(vedev->pdev) && !hw_skip_fpga_init) {
-		/* initialize FPGA */
-		err = ve_init_fpga(vedev);
-		if (err) {
-			pdev_err(vedev->pdev, "fail to initialize FPGA (%d)\n",
-					err);
-			return err;
-		}
-	}
-
-	return 0;
-}
-
-static inline void do_link_down_eif_inh(struct ve_dev *vedev)
-{
-	pdev_trace(vedev->pdev);
-
-	ve_bar2_write64(vedev, LINK_DOWN_EIF_INH_OFFSET,
-			LINK_DOWN_EIF_INH_DATA);
-}
-
-static inline void do_ve_chip_reset(struct ve_dev *vedev)
-{
-	pdev_info(vedev->pdev, "Reset VE chip\n");
-
-	/* Cancel Interrupt settings */
-	ve_bar2_write64(vedev, 0x01420090, 0xffc0fffff0008080);
-	ve_bar2_write64(vedev, 0x014200A8, 0xffc0ef9800000000);
-
-	/* VE Card reset */
-	ve_bar2_write64(vedev, 0x01400198, 0x0000020000000200);
-	ve_bar2_write64(vedev, 0x01400190, 0x8800000000200052);
-}
-
-static inline void do_ve_secondary_bus_reset(struct ve_dev *vedev)
-{
-	struct pci_dev *parent = vedev->pdev->bus->self;
-
-	pdev_info(parent, "Reset Secondary Bus\n");
-
-	/* Link down EIF INH */
-	do_link_down_eif_inh(vedev);
-
-	/* Issue secondary bus reset */
-#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
-	pci_reset_bridge_secondary_bus(parent);
-#else
-	pci_bridge_secondary_bus_reset(parent);
-#endif
-}
-
-static int ve_reset_and_fwupdate(struct ve_dev *vedev, uint64_t sbr,
-		int update_only, int irq)
-{
-	struct pci_dev *pdev = vedev->pdev;
-	int err;
-	u16 aer_cap;
-	int retry=0;
-	pdev_trace(vedev->pdev);
-
-	err = ve_prepare_for_chip_reset(vedev, &aer_cap, irq, sbr);
-	if (err)
-		return err;
-
-	if (update_only)
-		goto load_fw;
-
-	/*
-	 * Do secondary bus reset or chip reset.
-	 */
-	if (sbr)
-		do_ve_secondary_bus_reset(vedev);
-	else
-		do_ve_chip_reset(vedev);
-
-	/* Wait wait_after_vereset_sec sec */
-	do {
-		ssleep(1);
-		err = ve_check_pci_link(vedev->pdev);
-	} while( ++retry < wait_after_vereset_sec && err );
-
-	if(err){
-		pdev_err(pdev, "Waited for %d seconds, but VE RESET failed\n", retry);
-		return err;
-	}
-
-	/* Skip FW loading */
-	goto recover_chip_reset;
-
- load_fw:
-	err = ve_device_needs_firm_update(vedev);
-	if (err == false)
-		goto recover_chip_reset;
-
-	/*
-	 * Load PCIe Gen3 firmware here. And then chip will be reset.
-	 * We need to wait for a while for the PCIe link comes up.
-	 */
-	pdev_info(pdev, "Loading PCIe Firmware\n");
-
-	err = ve_load_gen3_firmware(vedev);
-	if (err) {
-		pdev_err(pdev, "Failed to load PCIe Firmware\n");
-		(void)ve_recover_from_chip_reset(vedev, &aer_cap, irq,
-				update_only, 0);
-		return err;
-	}
-
- recover_chip_reset:
-	err = ve_recover_from_chip_reset(vedev, &aer_cap, irq, update_only,
-			sbr);
-
-	return err;
-}
-
-int ve_chip_reset_sbr(struct ve_dev *vedev, uint64_t sbr)
-{
-	int irq = 1;
-	int err = 0;
-
-	mutex_lock(&vedev->node->sysfs_mutex);
-	if (vedev->node->os_state != OS_ST_OFFLINE) {
-		err = -EAGAIN;
-		goto err_state;
-	}
-	if (sbr)
-		irq = 0;
-	err = ve_reset_and_fwupdate(vedev, sbr, 0, irq);
-
- err_state:
-	mutex_unlock(&vedev->node->sysfs_mutex);
-	return err;
-}
-
-int ve_firmware_update(struct ve_dev *vedev)
-{
-	int err = 0;
-
-	mutex_lock(&vedev->node->sysfs_mutex);
-	if (vedev->node->os_state != OS_ST_OFFLINE) {
-		err = -EAGAIN;
-		goto err_state;
-	}
-	err = ve_reset_and_fwupdate(vedev, 0, 1, 1);
-
- err_state:
-	mutex_unlock(&vedev->node->sysfs_mutex);
-	return err;
-}
 
 /**
- * @brief Enable MSI/MSI-X interrupts and request irqs.
+ * @brief Enable Gen3 Link mode
  *
- * @param[in] vedev: device to enable interrupt
+ * @param pdev PCI device structure
  *
  * @return 0 on success. Negative on failure.
  */
-static int ve_enable_irqs(struct ve_dev *vedev)
+int ve_drv_set_lnkctl2_target_speed(struct pci_dev *pdev, u8 link_speed)
 {
-	int entry, free_entry;
-	int err = -1;
-	struct pci_dev *pdev;
+	int err;
+	u16 link_ctl2;
 
-	pdev_trace(vedev->pdev);
-
-	pdev = vedev->pdev;
-	vedev->msix_nvecs = pci_msix_vec_count(pdev);
-	if (!(vedev->msix_nvecs)) {
-		pdev_err(pdev, "MSI-X is not available\n");
-		goto err_msix_count;
-	}
-	vedev->msix_entries = kcalloc(vedev->msix_nvecs,
-				      sizeof(struct msix_entry), GFP_KERNEL);
-	if (!(vedev->msix_entries))
-		goto err_msix_count;
-	for (entry = 0; entry < vedev->msix_nvecs; entry++)
-		vedev->msix_entries[entry].entry = entry;
-
-	/*
-	 * pci_enable_msix doesn't return positive when nvec is obtained
-	 * by pci_msix_vec_count(). So something is wrong with previous code
-	 * if this returns positive value.
-	 */
-#if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
-	err = pci_enable_msix(pdev, vedev->msix_entries, vedev->msix_nvecs);
-	if (err < 0) {
-		pdev_err(pdev, "Failed to enable MSI-X\n");
-		goto err_enable_msix;
-	} else if (err > 0) {
-		pdev_err(pdev, "Failed to count MSI-X vector. (%d)\n", err);
-		err = -1;
-		goto err_enable_msix;
+	if (link_speed > 0x7) {
+		pdev_err(pdev, "invalid linkspeed is specified.\n");
+		return -1;
 	}
 
-#else
-	err = pci_enable_msix_range(pdev, vedev->msix_entries, vedev->msix_nvecs,vedev->msix_nvecs);
-	if (err < 0) {
-		pdev_err(pdev, "Failed to enable MSI-X\n");
-		goto err_enable_msix;
-	} else if (err != vedev->msix_nvecs ) {
-		pdev_err(pdev, "Failed to count MSI-X vector. (%d)\n", err);
-		err = -1;
-		goto err_enable_msix;
+	/* Read Link Control 2 Register (PCIe r3.0-complient)  */
+	err = pcie_capability_read_word(pdev, PCI_EXP_LNKCTL2, &link_ctl2);
+	if (err) {
+		pdev_err(pdev, "Failed to read Link Control 2 Register\n");
+		return -1;
+	}
+	if ((link_ctl2 & 0xf) == link_speed) {
+		pdev_dbg(pdev, "link speed is already set\n");
+		return 0;
 	}
 
-#endif
-
-	for (entry = 0; entry < vedev->msix_nvecs; entry++) {
-		err = request_irq(vedev->msix_entries[entry].vector,
-				  ve_intr, 0, ve_driver_name, pdev);
-		if (err) {
-			pdev_err(pdev, "request_irq of vector %d failed.(%d)\n",
-				 vedev->msix_entries[entry].vector, err);
-			goto err_request_irq;
-		}
-		pdev_dbg(pdev, "MSI-X is enabled. vector = %d, entry = %d\n",
-			 vedev->msix_entries[entry].vector,
-			 vedev->msix_entries[entry].entry);
-	}
+	/* set target link speed */
+	link_ctl2 &= ~0xf;
+	link_ctl2 |= link_speed;
+	pcie_capability_write_word(pdev, PCI_EXP_LNKCTL2, link_ctl2);
+	pdev_info(pdev, "link cntrol 2 register is set (0x%x)\n", link_ctl2);
 
 	return 0;
-
- err_request_irq:
-	for (free_entry = 0; free_entry < entry; free_entry++)
-		free_irq(vedev->msix_entries[free_entry].vector, pdev);
-	pci_disable_msix(pdev);
-
- err_enable_msix:
-	kfree(vedev->msix_entries);
- err_msix_count:
-
-	return err;
 }
+
 
 /**
  * @brief
@@ -1567,11 +1188,36 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	vedev->pdev = pdev;
 	pci_set_drvdata(pdev, vedev);
 
+	kref_init(&vedev->ve_dev_ref);
+	kref_init(&vedev->final_ref);
+	/* ref=2 for remove and release */
+	ve_drv_final_get(vedev);
+	init_waitqueue_head(&vedev->release_q);
+	vedev->remove_processing = false;
+
 	/* Get minor number */
 	minor = ve_get_minor(vedev);
 	if (minor < 0) {
 		err = minor;
 		goto err_minor;
+	}
+
+	vedev->arch_class = ve_drv_probe_arch_class(vedev);
+	if (vedev->arch_class == NULL) {
+		err = -EINVAL;
+		goto err_arch_probe;
+	}
+
+	if (vedev->arch_class->init_early) {
+		err = vedev->arch_class->init_early(vedev);
+		if (err){
+			pdev_err(pdev,
+				 "failed init_early(%d)",
+				 err);
+			/*
+			 * not error return
+			 */
+		}
 	}
 
 	pci_set_master(pdev);
@@ -1582,10 +1228,10 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	vedev->bars = pci_select_bars(pdev, IORESOURCE_MEM);
 	pdev_dbg(pdev, "bars = 0x%x\n", vedev->bars);
 
-	/* BAR 01, 2, 3, 4, 5 is required for VE */
-	if (!(vedev->bars & 0x3e)) {
-		pdev_err(pdev, "Insufficient BARs(0x%x)\n",
-				vedev->bars);
+	/* check BARs */
+	if (vedev->bars != vedev->arch_class->expected_bar_mask) {
+		pdev_err(pdev, "Insufficient BARs(0x%x != 0x%x)\n",
+			vedev->bars, vedev->arch_class->expected_bar_mask);
 		goto err_pci_bar;
 	}
 
@@ -1621,17 +1267,16 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		err = -EIO;
 		goto err_init_dma;
 	}
-
 	/* allocate coherent DMA address (use for EXSRAR target) */
 	vedev->vdma_addr = dma_zalloc_coherent(&pdev->dev,
-					       sizeof(uint64_t) *
-					       VE_MAX_CORE_NUM,
-					       &vedev->pdma_addr, GFP_KERNEL);
-	if (!(vedev->vdma_addr))
+					sizeof(uint64_t) *
+					vedev->arch_class->max_core_num,
+					&vedev->pdma_addr, GFP_KERNEL);
+	if (!(vedev->vdma_addr)){
+		err = -EIO;
 		goto err_dma_alloc;
-
+	}
 	pdev_dbg(pdev, "vedev->pdma_addr = %llx\n", vedev->pdma_addr);
-
 	/* init internal structures */
 	err = ve_drv_init_ve_node(vedev);
 	if (err) {
@@ -1645,24 +1290,52 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_init_pci;
 	}
 
-	/* Update Firmware */
-	if (!skip_fw_update) {
-		err = ve_reset_and_fwupdate(vedev, 0, 1, 0);
-		if (err && err != -EIO)
-			goto err_fw_update;
+	/*
+	 * initialization after preparing ve_node:
+	 * e.g. update firmware
+	 */
+	if (vedev->arch_class->init_post_node) {
+		err = vedev->arch_class->init_post_node(vedev);
+		if (err) {
+			pdev_err(pdev,
+				"failed initialization after ve_node (%d)",
+				err);
+			goto err_init_post_node;
+		}
 	}
+	if (vedev->arch_class->init_hw_check) {
+		err = vedev->arch_class->init_hw_check(vedev);
+		if (err) {
+			pdev_err(pdev,
+				"failed hw init check or numa config (%d)",
+				err);
+			/*
+			 * not error return
+			 */
 
+		}
+	}
 	err = ve_drv_init_ve_core(vedev);
 	if (err)
 		goto err_init_core;
 
+	/*
+	 * initialization after preparing ve_node:
+	 * e.g. clear INTVEC mask
+	 */
+	if (vedev->arch_class->init_post_core) {
+		err = vedev->arch_class->init_post_core(vedev);
+		if (err) {
+			pdev_err(pdev,
+				"failed initialization after ve_core (%d)",
+				err);
+			goto err_init_post_core;
+		}
+	}
+
 	err = ve_init_exsrar(vedev);
 	if (err)
 		goto err_init_core;
-
-	/* Clear interrupt mask register */
-	ve_bar2_write64_20(vedev,
-			PCI_BAR2_SCR_OFFSET + CREG_INTERRUPT_VECTOR, ~0ULL);
 
 	/* get dev_t */
 	devt = MKDEV(ve_major, minor);
@@ -1693,14 +1366,17 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (err)
 		goto err_sysfs;
 
-	err = ve_enable_irqs(vedev);
+	err = ve_drv_enable_irqs(vedev);
 	if (err) {
-		pdev_err(pdev, "ve_enable_irqs failed (%d)\n", err);
+		pdev_err(pdev, "ve_drv_enable_irqs failed (%d)\n", err);
 		goto err_enable_msi;
 	}
 
-	pdev_info(pdev, "probe succeeded\n");
+	if (vedev->arch_class->init_hw_check)
+		sysfs_notify(&vedev->device->kobj, NULL, "ve_state");
 
+
+	pdev_info(pdev, "probe succeeded\n");
 	return 0;
 
  err_enable_msi:
@@ -1711,13 +1387,15 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	cdev_del(&vedev->cdev);
  err_cdev_create:
 	ve_drv_fini_ve_core(vedev);
+ err_init_post_core:
  err_init_core:
- err_fw_update:
+ err_init_post_node:
 	pci_load_and_free_saved_state(pdev, &vedev->saved_state);
  err_init_pci:
 	ve_drv_del_ve_node(vedev);
  err_init_node:
-	dma_free_coherent(&pdev->dev, sizeof(uint64_t) * VE_MAX_CORE_NUM,
+	dma_free_coherent(&pdev->dev,
+			  sizeof(uint64_t) * vedev->arch_class->max_core_num,
 			  vedev->vdma_addr, vedev->pdma_addr);
  err_dma_alloc:
  err_init_dma:
@@ -1728,6 +1406,10 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
  err_pci_enable:
 	pci_disable_device(pdev);
  err_pci_bar:
+	if (vedev->arch_class->fini_late)
+		vedev->arch_class->fini_late(vedev);
+
+ err_arch_probe:
 	ve_free_minor(vedev);
  err_minor:
 	kfree(vedev);
@@ -1735,6 +1417,80 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	pdev_err(pdev, "probe error (return %d)\n", err);
 
 	return err;
+}
+
+/**
+ * @brief final remove ve software resource
+ *
+ * @param[in] vedev: VE device structure
+ */
+static void ve_remove_final(struct kref *kref)
+{
+	struct ve_dev *vedev = container_of(kref,struct ve_dev, final_ref);
+	pr_debug("ve_remove_final in\n");
+
+	/* free core structures */
+	ve_drv_fini_ve_core(vedev);
+	pr_debug("core structures removed\n");
+
+	/* free node structures */
+	ve_drv_del_ve_node(vedev);
+	pr_debug("node structures removed\n");
+
+	kfree(vedev);
+	pr_debug("ve_remove_final out\n");
+}
+
+/*
+ * @brief de reference vedev
+ *
+ * @param[in] vedev: VE device structure
+ */
+void ve_drv_final_put(struct ve_dev *vedev)
+{
+	kref_put(&vedev->final_ref, ve_remove_final);
+}
+
+/**
+ * @brief reference final vedev
+ *
+ * @param[in] vedev: VE device structure
+ */
+void ve_drv_final_get(struct ve_dev *vedev)
+{
+	kref_get(&vedev->final_ref);
+}
+
+/**
+ * @brief wakeup remove process
+ *
+ * @param[in] vedev: VE device structure
+ */
+static void ve_wakeup_remove(struct kref *kref)
+{
+	struct ve_dev *vedev = container_of(kref,struct ve_dev, ve_dev_ref);
+	wake_up(&vedev->release_q);
+	ve_drv_final_put(vedev);
+}
+
+/**
+ * @brief de reference vedev
+ *
+ * @param[in] vedev: VE device structure
+ */
+void ve_drv_device_put(struct ve_dev *vedev)
+{
+	kref_put(&vedev->ve_dev_ref, ve_wakeup_remove);
+}
+
+/**
+ * @brief reference vedev
+ *
+ * @param[in] vedev: VE device structure
+ */
+void ve_drv_device_get(struct ve_dev *vedev)
+{
+	kref_get(&vedev->ve_dev_ref);
 }
 
 /**
@@ -1749,15 +1505,151 @@ static void ve_pci_remove(struct pci_dev *pdev)
 {
 	int i;
 	struct ve_dev *vedev;
+	int wsec;
+	unsigned long flags;
+	struct list_head *head, *ptr, *n;
+	struct ve_task *task;
+	struct ve_node *node;
+	int rv;
 
 	pdev_trace(pdev);
 	vedev = pci_get_drvdata(pdev);
 
+	node = vedev->node;
+	head = &node->task_head;
+
 	pdev_dbg(pdev, "remove vedev %p\n", vedev);
 
+	/*
+	 * subsequent new open, ioctl, mmap  will be block and return with -ENODEV
+	 */
+	spin_lock_irqsave(&node->lock, flags);
+	vedev->remove_processing = true;
+	spin_unlock_irqrestore(&node->lock, flags);
+	pdev_dbg(pdev, "subsequent block done\n");
+
+
+	/*
+	 * if no one is open, decrement ref count and call wakeup(),
+	 * but, wakeup () doesn't make sense. Because it wait after this _put()
+	 */
+	ve_drv_device_put(vedev);
+
+
+	/*
+	 * First send SIGTERM to successfully terminate all open processes on
+	 *  the device.
+	 */
+	spin_lock_irqsave(&node->lock, flags);
+	list_for_each_safe(ptr, n, head) {
+		task = list_entry(ptr, struct ve_task, list);
+		rv = kill_pid(task->pid, SIGTERM, 1);
+		pdev_info(pdev,
+			  "send SIGTERM to process %d when device removing\n",
+			  pid_vnr(task->pid));
+		if (rv < 0) {
+			pdev_err(pdev,
+				 "Error send end SIGTERM to Process %d(%d)\n",
+				 pid_vnr(task->pid), rv);
+		}
+	}
+	spin_unlock_irqrestore(&node->lock, flags);
+
+	wsec = 0;
+	do {
+		rv = wait_event_interruptible_timeout(vedev->release_q,
+						      kref_read(&vedev->ve_dev_ref)
+						      == 0,
+						      msecs_to_jiffies(1000));
+	} while( kref_read(&vedev->ve_dev_ref) != 0 &&
+		 ++wsec < wait_sec_after_sigterm_on_remove &&
+		 rv != -ERESTARTSYS );
+
+
+	if ( kref_read(&vedev->ve_dev_ref) != 0 ){
+		pdev_warn(vedev->pdev,
+			  "someone is still using the device (%d) (%d)\n",
+			  kref_read(&vedev->ve_dev_ref), rv );
+	}else {
+		pdev_info(vedev->pdev, "device reference (%d) (%d)\n",
+			  kref_read(&vedev->ve_dev_ref), rv );
+	}
+
+	/* wake up processes in task->waitq_dead  */
+	ve_drv_del_all_task(vedev);
+	pdev_dbg(pdev, "wakeup task waitq_dead  done\n");
+	/*
+	 * wake up all processes in the interrupt wait queue
+	 */
+	wake_up_interruptible_all(&vedev->node->waitq);
+	pdev_dbg(pdev, "wakeup node waitq  done\n");
+
+	/*
+	 * Finally, if there are still processes to open the device, kill them
+	 * all. this will call the ve_drv_release() at context of opend process.
+	 * process.However, this is not the best finsh for the application.
+	 */
+	spin_lock_irqsave(&node->lock, flags);
+	list_for_each_safe(ptr, n, head) {
+		task = list_entry(ptr, struct ve_task, list);
+		rv = kill_pid(task->pid, SIGKILL, 1);
+		pdev_info(pdev,
+			  "send SIGKILL to process %d when device removing\n",
+			  pid_vnr(task->pid));
+		if (rv < 0) {
+			pdev_err(pdev, "Error killing Process %d(%d)\n",
+				 pid_vnr(task->pid), rv);
+		}
+	}
+	spin_unlock_irqrestore(&node->lock, flags);
+
+	/*
+	 * Wait for all processes that opened this VE to complete the release
+	 * (close). if kref_read() == 0 , No one is open, so wake up immediately
+	 * without waiting.
+	 * N.B.
+	 * release() use sysfs for notify so can't do after ve_drv_fini_sysfs().
+	 */
+	//wait_event(vedev->release_q,  kref_read(&vedev->ve_dev_ref) == 0);
+	wsec = 0;
+	do {
+		rv = wait_event_interruptible_timeout(vedev->release_q,
+						      kref_read(&vedev->ve_dev_ref)
+						      == 0,
+						      msecs_to_jiffies(1000));
+	} while( kref_read(&vedev->ve_dev_ref) != 0 &&
+		 ++wsec < wait_sec_after_sigkill_on_remove &&
+		 rv != -ERESTARTSYS );
+
+	if ( kref_read(&vedev->ve_dev_ref) != 0 ){
+		pdev_err(vedev->pdev,
+			 "someone is still using the device (%d) (%d)\n",
+			 kref_read(&vedev->ve_dev_ref), rv );
+	}
+
+	/* stop all memory transfer */
+	ve_drv_stop_all_cores_dmas(vedev);
+	/* disable bus mastering */
+	pci_clear_master(pdev);
+
 	/* free irqs */
-	ve_disable_irqs(vedev);
+	ve_drv_disable_irqs(vedev);
 	pdev_dbg(pdev, "ve_fini_intr done\n");
+	/*
+	 * if someone get ownership, someone may be wait for release.
+	 * notify waiter, but waiter can't get ownerhisp.
+	 */
+	spin_lock_irqsave(&node->lock, flags);
+	if(vedev->node->ownership){
+		vedev->node->ownership = NULL;
+		sysfs_notify(&vedev->device->kobj, NULL,"ownership");
+		/*
+		 * noone can get ownership, because already remove_processing
+		 * is set ,so block next ioctl to get ownership.
+		 */
+		pdev_dbg( vedev->pdev,"fource ownership to NULL at remove\n");
+	}
+	spin_unlock_irqrestore(&node->lock, flags);
 
 	/* remove sysfs */
 	ve_drv_fini_sysfs(vedev);
@@ -1770,29 +1662,29 @@ static void ve_pci_remove(struct pci_dev *pdev)
 	cdev_del(&vedev->cdev);
 	pdev_dbg(pdev, "cdev_del done\n");
 
-	/* stop all memory transfer */
-	ve_drv_stop_all_cores_dmas(vedev);
+
 	/* release pages */
 	for (i = 0; i < NR_PD_LIST; i++)
 		vp_page_release_all(&vedev->node->hash_list_head[i]);
 
-	/* free structures */
-	ve_drv_del_all_task(vedev);
-	ve_drv_fini_ve_core(vedev);
 	pci_load_and_free_saved_state(pdev, &vedev->saved_state);
-	ve_drv_del_ve_node(vedev);
 
 	/* unmap BARs */
 	ve_unmap_bar(vedev);
 	pdev_dbg(pdev, "iounmap done\n");
 
 	/* free DMA coherent for EXSRAR */
-	dma_free_coherent(&pdev->dev, sizeof(uint64_t) * VE_MAX_CORE_NUM,
+	dma_free_coherent(&pdev->dev,
+			  sizeof(uint64_t) * vedev->arch_class->max_core_num,
 			  vedev->vdma_addr, vedev->pdma_addr);
 
 	/* release BARs */
 	pci_release_regions(pdev);
 	pdev_dbg(pdev, "pci_release_regions done\n");
+
+	/* finalizer after unmapping PCI resources */
+	if (vedev->arch_class->fini_late)
+		vedev->arch_class->fini_late(vedev);
 
 	/* disable bus mastering */
 	pci_disable_device(pdev);
@@ -1802,7 +1694,11 @@ static void ve_pci_remove(struct pci_dev *pdev)
 	ve_free_minor(vedev);
 	pdev_dbg(pdev, "minor number removed\n");
 
-	kfree(vedev);
+	/*
+	 * de reference vedev
+	 */
+	ve_drv_final_put(vedev);
+
 }
 
 /**

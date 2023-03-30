@@ -26,7 +26,8 @@
 %define	_prefix	@prefix@
 
 # Define Kernel version for rpm name here.
-%define REL_KVER	%(echo @KERNEL@ | sed -s "s/\.el.\.x86_64//" | tr - _)
+%define REL_KVER	%(uname -r | sed -s "s/\.el.*\.x86_64//" | tr - _)
+%define KVER	        %(uname -r)
 
 Name:		@PACKAGE@
 Version:	@VERSION@
@@ -57,14 +58,14 @@ This package contains header required to build applications that
 use ve_drv module
 
 # Magic hidden here.
-%{expand:%(sh %{SOURCE10} rpmtemplate %{kmod_name} @KERNEL@ "")}
+%{expand:%(sh %{SOURCE10} rpmtemplate %{kmod_name} %{KVER} "")}
 
 %prep
 %setup -q -a 0
 echo "override %{kmod_name} * weak-updates/%{kmod_name}" > kmod-%{kmod_name}.conf
 
 %build
-%configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@ --with-kernel=@KERNEL@
+%configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@ --with-kernel=%{KVER}
 make %{?_smp_mflags}
 
 %install
@@ -74,7 +75,8 @@ export INSTALL_MOD_DIR=extra/
 make install DESTDIR=$RPM_BUILD_ROOT
 %{__install} -d $RPM_BUILD_ROOT%{_sysconfdir}/depmod.d/
 %{__install} kmod-%{kmod_name}.conf $RPM_BUILD_ROOT%{_sysconfdir}/depmod.d/
-
+mkdir -p $RPM_BUILD_ROOT/opt/nec/ve/veos/libexec/
+install -m 755 helper/ve_check_config $RPM_BUILD_ROOT/opt/nec/ve/veos/libexec/
 # Set the module(s) to be executable, so that they will be stripped when packaged.
 find $RPM_BUILD_ROOT -type f -name \*.ko -exec %{__chmod} u+x \{\} \;
 
@@ -96,8 +98,9 @@ fi
 %{_prefix}/*
 %config(noreplace) %{_sysconfdir}/modprobe.d/*
 %config(noreplace) %{_sysconfdir}/dracut.conf.d/*
-/lib/modules/@KERNEL@/extra/*
+/lib/modules/%{KVER}/extra/*
 %config @SYSTEMD_UNITDIR@/*
+/opt/nec/ve/veos/libexec/ve_check_config
 
 %files devel
 %defattr(-,root,root,-)

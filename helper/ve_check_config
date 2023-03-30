@@ -1,0 +1,25 @@
+#!/bin/sh
+
+dbf="$1"
+devN="$2"
+numamode="$3"
+MMMCHECK="/opt/nec/ve/mmm/sbin/ve_init"
+
+for root in /sys/devices/pci*:*; do
+        pcipath=$(find "$root" -name "$dbf" | grep -v "iommu"  2>/dev/null)
+        if [ -n "$pcipath" ]; then
+                slotnum=$(env DEVPATH="${pcipath#/sys}/ve/ve${devN}" \
+                              /opt/nec/ve/veos/libexec/ve_sequential_name 2>/dev/null)
+                if [ $? -eq 0 ];then
+                        # call MMM numacheck XXXX scripts  or comman with 
+                        # slotnum(veslotN) and numamode
+                        # retrun 0: F/W and setting  are same
+                        #        1: F/W and setting  are different
+                        ${MMMCHECK} "$slotnum" "$dbf" "$numamode"
+                        exit $?
+                else
+		    logger -is -t ve_check_config -p user.err error $?
+                fi
+        fi
+done
+exit 1

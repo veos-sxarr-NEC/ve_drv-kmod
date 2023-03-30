@@ -12,7 +12,7 @@
 #include <immintrin.h>
 #include <xmmintrin.h>
 #include <time.h>
-#define _VE_ARCH_VE1_ 1
+
 #include "bar_access.h"
 
 #ifdef DEBUG
@@ -32,7 +32,7 @@ bool option_printspeed = false;
 
 void usage(void)
 {
-	printf("Usage: mmio_tool [-f devicefile] [-b 01|2|3] [-r|-w] [-a offset] "
+	printf("Usage: mmio_tool [-f devicefile] [-b 01|2|4] [-r|-w] [-a offset] "
 			"[-s size] [-d data]\n");
 	printf("Example: # mmio_tool -f /dev/ve0 -b 01 -w -a 0x100 -s 0x8 "
 			"-d 0xdeadbeefdeadbeef\n");
@@ -254,11 +254,11 @@ main(int argc, char *argv[])
 					return 1;
 				} else {
 					if (!strncmp(optarg, "01", 2)) {
-						bar = VE1_BAR_01;
+						bar = VE3_BAR_01;
 					} else if (!strncmp(optarg, "2", 1)) {
-						bar = VE1_BAR_2;
-					} else if (!strncmp(optarg, "3", 1)) {
-						bar = VE1_BAR_3;
+						bar = VE3_BAR_23;
+					} else if (!strncmp(optarg, "4", 1)) {
+						bar = VE3_BAR_4;
 					} else {
 						fprintf(stderr,
 							"invalid BAR\n");
@@ -368,19 +368,19 @@ main(int argc, char *argv[])
 	}
 
 	/* Check access range */
-	if (bar == VE1_BAR_01) {
-		if (offset + size > VE1_BAR0_SIZE) {
+	if (bar == VE3_BAR_01) {
+		if (offset + size > VE3_BAR0_SIZE) {
 			fprintf(stderr, "out of BAR01 range.\n");
 			return 1;
 		}
-	} else if (bar == VE1_BAR_2) {
-		if (offset + size > VE1_BAR2_SIZE) {
+	} else if (bar == VE3_BAR_23) {
+		if (offset + size > VE3_BAR2_SIZE) {
 			fprintf(stderr, "out of BAR2 range.\n");
 			return 1;
 		}
-	} else if (bar == VE1_BAR_3) {
-		if (offset + size > VE1_BAR3_SIZE) {
-			fprintf(stderr, "out of BAR3 range.\n");
+	} else if (bar == VE3_BAR_4) {
+		if (offset + size > VE3_BAR4_SIZE) {
+			fprintf(stderr, "out of BAR4 range.\n");
 			return 1;
 		}
 	}

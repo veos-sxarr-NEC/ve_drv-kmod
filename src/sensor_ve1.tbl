@@ -1,0 +1,65 @@
+#
+# Copyright (C) 2017-2018 NEC Corporation
+# This file is part of VE Driver.
+#
+# VE Driver is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# VE Driver is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with the VE Driver; if not, see
+# <http://www.gnu.org/licenses/>.
+#
+#
+# sensor.tbl
+#
+# Definition of sensor sysfs file number
+# and corresponding decoder
+#
+# format:
+# <sensor number>	<decoder macro>
+
+0	ve_drv_sysfs_sensor_type_a
+1	ve_drv_sysfs_sensor_type_a
+2	ve_drv_sysfs_sensor_type_b
+3	ve_drv_sysfs_sensor_type_l
+4	ve_drv_sysfs_sensor_type_c
+5	ve_drv_sysfs_sensor_type_c
+6	ve_drv_sysfs_sensor_type_c
+7	ve_drv_sysfs_sensor_type_c
+8	ve_drv_sysfs_sensor_type_d
+9	ve_drv_sysfs_sensor_type_d
+10	ve_drv_sysfs_sensor_type_e
+11	ve_drv_sysfs_sensor_type_f
+12	ve_drv_sysfs_sensor_type_g
+13	ve_drv_sysfs_sensor_type_g
+14	ve_drv_sysfs_sensor_type_h
+15	ve_drv_sysfs_sensor_type_h
+16	ve_drv_sysfs_sensor_type_h
+17	ve_drv_sysfs_sensor_type_h
+18	ve_drv_sysfs_sensor_type_h
+19	ve_drv_sysfs_sensor_type_h
+20	ve_drv_sysfs_sensor_type_h
+21	ve_drv_sysfs_sensor_type_h
+22	ve_drv_sysfs_sensor_type_h
+23	ve_drv_sysfs_sensor_type_h
+24	ve_drv_sysfs_sensor_type_i
+25	ve_drv_sysfs_sensor_type_i
+26	ve_drv_sysfs_sensor_type_i
+27	ve_drv_sysfs_sensor_type_j
+28	ve_drv_sysfs_sensor_type_i
+29	ve_drv_sysfs_sensor_type_k
+30	ve_drv_sysfs_sensor_type_m
+31	ve_drv_sysfs_sensor_type_c
+32	ve_drv_sysfs_sensor_type_n
+33	ve_drv_sysfs_sensor_type_n
+34	ve_drv_sysfs_sensor_type_n
+35	ve_drv_sysfs_sensor_type_n
+36	ve_drv_sysfs_sensor_type_n
+37	ve_drv_sysfs_sensor_type_n

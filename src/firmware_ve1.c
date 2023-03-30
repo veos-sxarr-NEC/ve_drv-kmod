@@ -1,7 +1,7 @@
 /*
  * Vector Engine Driver
  *
- * Copyright (C) 2017-2018 NEC Corporation
+ * Copyright (C) 2017-2020 NEC Corporation
  * This file is part of VE Driver.
  *
  * VE Driver is free software; you can redistribute it and/or
@@ -21,13 +21,16 @@
 
 /*
  * @file firmware.c
- * @brief VE driver firmware loading.
+ * @brief VE1 driver firmware loading.
  */
 
 #include <linux/firmware.h>
+#include <linux/delay.h>
 #include <linux/jiffies.h>
+#define _VE_ARCH_VE1_ (1)
 #include "ve_drv.h"
 #include "internal.h"
+#include "mmio.h"
 
 #define FW_VE_SBUS_00	"fw_ve_sbus_00.bin"
 #define FW_VE_SDES_00	"fw_ve_sdes_00.bin"
@@ -314,6 +317,9 @@ error_out:
 	return -1;
 }
 
+#define VE1_FIRMWARE(vedev) \
+	(((struct ve1_archdep_data *)vedev->node->ve_archdep_data)->firmware)
+
 static int ve_load_gen3_sbus_firmware(struct ve_dev *vedev)
 {
 	int err;
@@ -326,7 +332,7 @@ static int ve_load_gen3_sbus_firmware(struct ve_dev *vedev)
 	/*
 	 * Load SBus Master firmware
 	 */
-	err = request_firmware(&vedev->firmware, FW_VE_SBUS_00,
+	err = request_firmware(&VE1_FIRMWARE(vedev), FW_VE_SBUS_00,
 			&pdev->dev);
 	if (err) {
 		pdev_err(pdev, "Can't load firmware file \"%s\"\n",
@@ -335,8 +341,8 @@ static int ve_load_gen3_sbus_firmware(struct ve_dev *vedev)
 	}
 	pdev_dbg(pdev, "Firmware is loaded \"%s\"\n", FW_VE_SBUS_00);
 
-	rom = (uint16_t *)vedev->firmware->data;
-	size = vedev->firmware->size;
+	rom = (uint16_t *)VE1_FIRMWARE(vedev)->data;
+	size = VE1_FIRMWARE(vedev)->size;
 
 	pdev_dbg(pdev, "Size = %zu\n", size);
 
@@ -412,11 +418,11 @@ static int ve_load_gen3_sbus_firmware(struct ve_dev *vedev)
 		goto err_sbus_fw;
 	}
 
-	release_firmware(vedev->firmware);
+	release_firmware(VE1_FIRMWARE(vedev));
 	return 0;
 
 err_sbus_fw:
-	release_firmware(vedev->firmware);
+	release_firmware(VE1_FIRMWARE(vedev));
 	return -EINVAL;
 }
 
@@ -436,7 +442,7 @@ static int ve_set_interrupt_code_data(struct ve_dev *vedev)
 
 	wait_nsec(vedev, 5000);
 
-	check_interrupt_progress(vedev, 213);
+	err = check_interrupt_progress(vedev, 213);
 	if (err)
 		return -1;
 
@@ -462,7 +468,7 @@ static int ve_load_gen3_sdes_firmware(struct ve_dev *vedev)
 	/*
 	 * Load full-featured PCIe firmware
 	 */
-	err = request_firmware(&vedev->firmware, FW_VE_SDES_00,
+	err = request_firmware(&VE1_FIRMWARE(vedev), FW_VE_SDES_00,
 			&pdev->dev);
 	if (err) {
 		pdev_err(pdev, "Can't load firmware file \"%s\"\n",
@@ -471,8 +477,8 @@ static int ve_load_gen3_sdes_firmware(struct ve_dev *vedev)
 	}
 	pdev_dbg(pdev, "Firmware is loaded \"%s\"\n", FW_VE_SDES_00);
 
-	rom = (uint16_t *)vedev->firmware->data;
-	size = vedev->firmware->size;
+	rom = (uint16_t *)VE1_FIRMWARE(vedev)->data;
+	size = VE1_FIRMWARE(vedev)->size;
 
 	/* (2-1) Set interrupt_code/data to PCIe for the update preparation */
 	err = ve_set_interrupt_code_data(vedev);
@@ -512,11 +518,11 @@ static int ve_load_gen3_sdes_firmware(struct ve_dev *vedev)
 		goto err_sdes_fw;
 	}
 
-	release_firmware(vedev->firmware);
+	release_firmware(VE1_FIRMWARE(vedev));
 	return 0;
 
 err_sdes_fw:
-	release_firmware(vedev->firmware);
+	release_firmware(VE1_FIRMWARE(vedev));
 	return -EINVAL;
 }
 
@@ -540,50 +546,13 @@ static int ve_notify_vmc_of_fw_update(struct ve_dev *vedev)
 }
 
 /**
- * @brief Enable Gen3 Link mode
- *
- * @param pdev PCI device structure
- *
- * @return 0 on success. Negative on failure.
- */
-int ve_set_lnkctl2_target_speed(struct pci_dev *pdev, u8 link_speed)
-{
-	int err;
-	u16 link_ctl2;
-
-	if (link_speed > 0x7) {
-		pdev_err(pdev, "invalid linkspeed is specified.\n");
-		return -1;
-	}
-
-	/* Read Link Control 2 Register (PCIe r3.0-complient)  */
-	err = pcie_capability_read_word(pdev, PCI_EXP_LNKCTL2, &link_ctl2);
-	if (err) {
-		pdev_err(pdev, "Failed to read Link Control 2 Register\n");
-		return -1;
-	}
-	if ((link_ctl2 & 0xf) == link_speed) {
-		pdev_dbg(pdev, "link speed is already set\n");
-		return 0;
-	}
-
-	/* set target link speed */
-	link_ctl2 &= ~0xf;
-	link_ctl2 |= link_speed;
-	pcie_capability_write_word(pdev, PCI_EXP_LNKCTL2, link_ctl2);
-	pdev_info(pdev, "link cntrol 2 register is set (0x%x)\n", link_ctl2);
-
-	return 0;
-}
-
-/**
  * @brief Load PCIe Gen3 Firmware
  *
  * @param[in] vedev: VE device structure
  *
  * @return 0 on success. negative on failure.
  */
-int ve_load_gen3_firmware(struct ve_dev *vedev)
+int ve_drv_ve1_load_gen3_firmware(struct ve_dev *vedev)
 {
 	int err;
 	struct pci_dev *pdev = vedev->pdev;
@@ -591,7 +560,7 @@ int ve_load_gen3_firmware(struct ve_dev *vedev)
 	pdev_trace(pdev);
 
 	/* (1-1) Set parent target speed to Gen1 */
-	err = ve_set_lnkctl2_target_speed(vedev->pdev->bus->self, 1);
+	err = ve_drv_set_lnkctl2_target_speed(vedev->pdev->bus->self, 1);
 	if (err)
 		return -EIO;
 
@@ -611,7 +580,7 @@ int ve_load_gen3_firmware(struct ve_dev *vedev)
 		return -EIO;
 
 	/* (4-2) Set parent target speed to Gen3 */
-	err = ve_set_lnkctl2_target_speed(vedev->pdev->bus->self, 3);
+	err = ve_drv_set_lnkctl2_target_speed(vedev->pdev->bus->self, 3);
 	if (err)
 		return -EIO;
 

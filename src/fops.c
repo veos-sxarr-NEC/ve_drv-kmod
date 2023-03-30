@@ -52,6 +52,8 @@
 #include <linux/sched/mm.h>
 #endif
 
+
+
 /**
  * @brief open method of VE file operation
  *
@@ -88,6 +90,7 @@ int ve_drv_open(struct inode *ino, struct file *filp)
 
 	/* Check if the pid is already in the list */
 	spin_lock_irqsave(&node->lock, flags);
+
 	list_for_each(ptr, head) {
 		task = list_entry(ptr, struct ve_task, list);
 		if (task->pid != pid)
@@ -98,6 +101,13 @@ int ve_drv_open(struct inode *ino, struct file *filp)
 		spin_unlock_irqrestore(&node->lock, flags);
 		put_pid(pid);
 		return -EBUSY;
+	}
+	/* block open,  device will be deleted */
+	if( vedev->remove_processing ){
+		spin_unlock_irqrestore(&node->lock, flags);
+		pdev_dbg(vedev->pdev,"device will be deleted, open is blocked\n");
+		put_pid(pid);
+		return -EINTR;// -ENODEV;
 	}
 	spin_unlock_irqrestore(&node->lock, flags);
 
@@ -118,6 +128,7 @@ int ve_drv_open(struct inode *ino, struct file *filp)
 	task->pid = pid;
 	task->mm = NULL;
 	task->mmap = false;
+	task->ownership = false;
 
 	filp->private_data = task;
 
@@ -129,26 +140,11 @@ int ve_drv_open(struct inode *ino, struct file *filp)
 
 	pdev_dbg(vedev->pdev, "task %d has been created\n",
 			pid_vnr(task->pid));
+	/* reference dev */
+	ve_drv_device_get(vedev);
+
 
 	return 0;
-}
-
-/**
- * @brief Read EXS register value from MMIO space
- *
- * @param[in] vedev: VE device structure
- * @param core_id: VE core ID
- *
- * @return EXS value
- */
-static inline uint64_t ve_get_exs_from_io(struct ve_dev *vedev, int core_id)
-{
-	uint64_t exs;
-
-	ve_bar2_read64(vedev, PCI_BAR2_CREG_SIZE * core_id
-		       + UREG_EXS_OFFSET, &exs);
-
-	return exs;
 }
 
 /**
@@ -163,55 +159,42 @@ static inline uint64_t ve_get_exs_from_io(struct ve_dev *vedev, int core_id)
  */
 static inline uint64_t ve_get_exs(struct ve_dev *vedev, int core_id)
 {
-	struct ve_node *node = vedev->node;
-	u64 timeout_jiffies;
-	uint64_t exs = 0;
-	int count = 0;
 
-	pdev_trace(vedev->pdev);
+        u64 timeout_jiffies;
+        uint64_t exs = 0;
+        int count = 0;
 
-	/* Check if EXSRAR is available */
-	if (!exsrar_poll_timeout_msec || !(vedev->pdma_addr)
-	    || node->core[core_id]->exs == NULL) {
-		pdev_dbg(vedev->pdev,
-				"EXSRAR target memory is not available\n");
-		goto reg_read;
-	}
+        pdev_trace(vedev->pdev);
 
-	pdev_dbg(vedev->pdev, "EXSRAR target memory seems to be available\n");
-	/* get current jiffies and convert it to usec */
-	timeout_jiffies = get_jiffies_64() +
-	    msecs_to_jiffies(exsrar_poll_timeout_msec);
+        /* get current jiffies and convert it to usec */
+        timeout_jiffies = get_jiffies_64() +
+            msecs_to_jiffies(exsrar_poll_timeout_msec);
 
-	/* poll exsrar target address */
-	do {
-		if (node->core[core_id]->exs != 0)
-			exs = *(node->core[core_id]->exs);
-		if (exs) {
-			/* We've dug up a value ! */
-			pdev_dbg(vedev->pdev,
-		"EXS value on EXSRAR target memory is used. retry count = %d\n",
-		count);
-			*(node->core[core_id]->exs) = 0;
-			return exs;
-		}
-		count++;
-
-		ndelay(exsrar_poll_delay_nsec);
-	} while (time_before64(get_jiffies_64(), timeout_jiffies));
-
-	pdev_warn(vedev->pdev,
-		"Core %d EXSRAR polling timeout. EXSRAR is disabled\n",
-		core_id);
-
-	/* Disable EXSRAR for this core */
-	node->core[core_id]->exs = NULL;
-
- reg_read:
-	exs = ve_get_exs_from_io(vedev, core_id);
-	if (exs == 0)
-		pdev_err(vedev->pdev, "EXS value read from BAR2 was 0x%llx!\n",
-				exs);
+        /* poll EXS register */
+        do {
+          //state is  +->10b -->11b -->01b+
+          //          <-------------------+
+          exs = vedev->arch_class->get_exs(vedev, core_id);
+          // 10b:EXECUTE
+          if ((exs & (EXS_STATE_RUN | EXS_STATE_STOP)) == EXS_STATE_RUN) {
+	    //ve_get_exs is called in run state
+            pdev_dbg(vedev->pdev, "EXS is STATE_RUN(0x%llx) count=%d\n",exs,count);
+            return exs;
+          }
+          // 01b:HALT
+          if ((exs & (EXS_STATE_RUN | EXS_STATE_STOP)) == EXS_STATE_STOP) {
+            if (count > 0) {
+              //ve_get_exs is called in before halt state, and then  halted.
+              pdev_dbg(vedev->pdev, "EXS is STATE_STOP(0x%llx) count =%d\n",exs,count);
+	    }
+	    return exs;
+          }
+          // 11b:BEFORE HALT
+          count++;
+          ndelay(exsrar_poll_delay_nsec);
+        } while (time_before64(get_jiffies_64(), timeout_jiffies));
+        //stil before halt state
+        pdev_err(vedev->pdev, "EXS is still before halt state. STATE(0x%llx) count =%d\n",exs,count);
 
 	return exs;
 }
@@ -246,8 +229,8 @@ int ve_drv_wait_exception(struct file *filp, uint64_t __user *user_exs)
 
 	pdev_trace(vedev->pdev);
 
-	if (filp->private_data == NULL)
-		return -ESRCH;
+
+
 
 	/*
 	 * TODO: This is workaround. Get mm should be removed.
@@ -331,6 +314,7 @@ int ve_drv_wait_exception(struct file *filp, uint64_t __user *user_exs)
 				"task %d is unassigned but EXS was not saved\n",
 				pid_nr(task->pid));
 	}
+	task->last_exs = exs;
 	spin_unlock_irqrestore(&node->lock, flags);
 
 	/* Copy EXS value to the user space */
@@ -421,7 +405,7 @@ out:
 	return ret;
 }
 
-#ifdef DEBUG
+#ifdef VE_DRV_DEBUG
 /**
  * @brief Print VE core information to the buffer
  *        This function is called via sysfs
@@ -571,13 +555,12 @@ int ve_drv_assign_task_to_core(struct ve_dev *vedev,
  *         -EBUSY if the VE core is in running state.
  */
 static int _unassign_task_from_core(struct ve_dev *vedev, struct ve_task *task,
-		int force)
+				    int force, int check_exsreg)
 {
 	int core_id;
 	int count;
 	struct ve_node *node = vedev->node;
 	uint64_t exs = 0;
-	uint64_t intvec = 0;
 
 	for (core_id = 0; core_id < node->core_fls; core_id++) {
 		if (node->core[core_id]->task != task)
@@ -593,7 +576,7 @@ static int _unassign_task_from_core(struct ve_dev *vedev, struct ve_task *task,
 		 * during VE task unassignment. Following checks are
 		 * just for preventing VEOS from bug.
 		 */
-		exs = ve_get_exs_from_io(vedev, core_id);
+		exs = vedev->arch_class->get_exs(vedev, core_id);
 		if (exs & EXS_STATE_RUN)
 			return -EBUSY;
 
@@ -605,24 +588,47 @@ static int _unassign_task_from_core(struct ve_dev *vedev, struct ve_task *task,
 				pid_vnr(task->pid));
 			/* Save EXS to task structure */
 			node->core[core_id]->count = 0;
-			task->exs = ve_get_exs(vedev, core_id);
+			if( check_exsreg ){
+				task->exs = exs;
+				/*
+				 * Wait for the write to *EXSRAR to complete, then
+				 * clears *EXSRAR, Use the value of the EXS register
+				 * instead of *EXSRAR.
+				 */
+				ve_get_exs(vedev, core_id);
+			} else
+				task->exs = ve_get_exs(vedev, core_id);
 			pdev_dbg(vedev->pdev,
 			"Saving exs value to the task %d (task->exs = %llx)\n",
 				pid_vnr(task->pid), task->exs);
-
-			/* wake the task */
-			task->wait_cond = 1;
-			wake_up_interruptible(&task->waitq);
+			if( check_exsreg == 0 ){
+				/* only VE1 */
+				/* wake the task */
+				task->wait_cond = 1;
+				wake_up_interruptible(&task->waitq);
+			}
 		} else {
-			ve_bar2_read64_sync(vedev,
-				PCI_BAR2_SCR_OFFSET + CREG_INTERRUPT_VECTOR,
-				&intvec);
 			/*
 			 * Interrupt has not been arrived yet so we return
 			 * -EAGAIN to wait for that
 			 */
-			if (intvec & ((uint64_t)0x8000000000000000 >> core_id))
+			if (vedev->arch_class->core_intr_undelivered(vedev,
+						core_id))
 				return -EAGAIN;
+
+			// Not interrupt,
+			// last_exs is 0 and this time have exception cause.
+			//
+			if( check_exsreg &&
+			    ( (EXS_EXCEPTION_MASK|EXS_RDBG) & task->last_exs ) == 0 &&
+			    ( (EXS_EXCEPTION_MASK|EXS_RDBG) & exs ) ){
+				pdev_dbg(vedev->pdev, "task %d is unassigned from core 0x%llx:0x%llx\n",
+					  pid_vnr(task->pid),task->last_exs, exs );
+                             task->exs = exs;
+			     task->wait_cond = 1;
+			     wake_up_interruptible(&task->waitq);
+			}
+
 		}
 unassign:
 		/* Unassign the task from the core */
@@ -644,13 +650,14 @@ unassign:
  *
  * @param[in] vedev: VE device structure
  * @param tid_ns: VE task ID seen from namespace of current
+ * @param check_exsreg:: check exs register directly
  *
  * @return 0 on success.
  *         -ESRCH if the VE task is not found.
  *         -EINVAL if the VE task is not assigned to any VE core.
  *         -EBUSY if the VE core is in running state.
  */
-int ve_drv_unassign_task_from_core(struct ve_dev *vedev, pid_t tid_ns)
+int ve_drv_unassign_task_from_core(struct ve_dev *vedev, pid_t tid_ns, int check_exsreg)
 {
 	struct ve_node *node = vedev->node;
 	struct list_head *head = &node->task_head;
@@ -670,7 +677,7 @@ int ve_drv_unassign_task_from_core(struct ve_dev *vedev, pid_t tid_ns)
 	spin_unlock_irqrestore(&node->lock, flags);
 	return -ESRCH;
  found:
-	ret = _unassign_task_from_core(vedev, task, 0);
+	ret = _unassign_task_from_core(vedev, task, 0, check_exsreg);
 	spin_unlock_irqrestore(&node->lock, flags);
 
 	return ret;
@@ -814,7 +821,7 @@ int ve_drv_del_all_task(struct ve_dev *vedev)
 		task = list_entry(ptr, struct ve_task, list);
 
 		/* Unassign task forcely */
-		(void)_unassign_task_from_core(vedev, task, 1);
+		(void)_unassign_task_from_core(vedev, task, 1, 0);
 
 		switch (task->state) {
 		case TASK_STATE_NEW:
@@ -879,9 +886,8 @@ int ve_drv_release(struct inode *ino, struct file *filp)
 	struct ve_node *node;
 	struct list_head *head, *ptr, *n;
 	int ret;
-
 	vedev = container_of(ino->i_cdev, struct ve_dev, cdev);
-
+	pdev_trace(vedev->pdev);
 	/* Just in case */
 	if (filp->private_data == NULL) {
 		pdev_warn(vedev->pdev,
@@ -923,7 +929,7 @@ int ve_drv_release(struct inode *ino, struct file *filp)
 		 * -EINVAL is expected. If success, it is VEOS bug.
 		 * VEOS must unassign task before deleting.
 		 */
-		ret = _unassign_task_from_core(vedev, task, 0);
+		ret = _unassign_task_from_core(vedev, task, 0, 0);
 		if (ret != -EINVAL) {
 			pdev_err(vedev->pdev,
 		"VEOS BUG: task %d is deleted without unassign from core\n",
@@ -947,8 +953,12 @@ int ve_drv_release(struct inode *ino, struct file *filp)
 	list_for_each_safe(ptr, n, head) {
 		list_task = list_entry(ptr, struct ve_task, list);
 		if (list_task == task) {
+			if( vedev->arch_class->ve_arch_release ){
+				vedev->arch_class->ve_arch_release(vedev,task);
+			}
 			pdev_dbg(vedev->pdev, "task %d is deleted\n",
 					pid_vnr(task->pid));
+
 			list_del(&task->list);
 			goto found;
 		}
@@ -956,12 +966,16 @@ int ve_drv_release(struct inode *ino, struct file *filp)
 	pdev_warn(vedev->pdev, "task %d is not found in the list\n",
 			pid_vnr(task->pid));
 found:
+
 	spin_unlock_irqrestore(&vedev->node->lock, flags);
 	put_pid(task->pid);
 	if (task->mm)
 		mmput(task->mm);
 	kfree(task);
 	filp->private_data = NULL;
+
+	/* de reference */
+	ve_drv_device_put(vedev);
 
 	return 0;
 }
@@ -1040,21 +1054,20 @@ int ve_drv_reset_intr_count(struct ve_dev *vedev, uint64_t core_id)
  *         -EINTR if it is interrupted by signal.
  *         -ETIMEDOUT in case of timeout.
  */
-static int _ve_drv_wait_intr(struct ve_dev *vedev, struct ve_wait_irq *irq,
-			     struct timespec *timeout)
+int ve_drv_generic_arch_wait_intr(struct ve_dev *vedev,
+	struct ve_wait_irq *irq, struct timespec *timeout,
+	bool (*check)(const struct ve_wait_irq *, const struct ve_wait_irq *),
+	void (*woken_cb)(struct ve_dev *,
+		struct ve_wait_irq *, struct ve_wait_irq *))
 {
 	int ret;
-	uint64_t mask_val;
 	struct ve_node *node = vedev->node;
-	unsigned long flags;
 
 	pdev_trace(vedev->pdev);
 
 	/* This will returns immediately when the condition is true. */
 	ret = wait_event_interruptible_timeout(node->waitq,
-					       (node->cond.upper & irq->upper)
-					       | (node->cond.lower &
-						       irq->lower),
+					       check(node->cond, irq),
 					       timespec_to_jiffies(timeout));
 
 	if (ret == -ERESTARTSYS)
@@ -1062,46 +1075,7 @@ static int _ve_drv_wait_intr(struct ve_dev *vedev, struct ve_wait_irq *irq,
 	if (ret == 0)
 		return -ETIMEDOUT;
 	if (ret > 0) {
-		/*
-		 * spinlock and save IRQs during manipulation of
-		 * condition bits
-		 */
-		spin_lock_irqsave(&vedev->node->lock, flags);
-
-		/* set caused bits */
-		irq->upper &= node->cond.upper;
-		irq->lower &= node->cond.lower;
-
-		/* drop caused bits from condition */
-		node->cond.upper &= ~(irq->upper);
-		node->cond.lower &= ~(irq->lower);
-
-		spin_unlock_irqrestore(&vedev->node->lock, flags);
-
-		pdev_dbg(vedev->pdev, "irq->upper = 0x%llx\n", irq->upper);
-		pdev_dbg(vedev->pdev, "irq->lower = 0x%llx\n", irq->lower);
-		pdev_dbg(vedev->pdev, "node->cond.upper = 0x%llx\n",
-				node->cond.upper);
-		pdev_dbg(vedev->pdev, "node->cond.lower = 0x%llx\n",
-				node->cond.lower);
-
-		/* following procedure is requrired only for DMA interrupt */
-		if (!(irq->lower & DMA_INTERRUPT_VECTOR_MASK))
-			return ret;
-
-		/*
-		 * Somewhat confusingly, "Interrupt Vector register" is
-		 * reversed order bit of MSI-X vector.
-		 * So we make reversed order bit-mask here.
-		 * See HW spec for more detail.
-		 */
-		mask_val = ve_bitrev64(irq->lower);
-		pdev_dbg(vedev->pdev, "mask_val = 0x%llx\n", mask_val);
-
-		/* Clear interrupt mask register by writing mask value */
-		ve_bar2_write64(vedev,
-				PCI_BAR2_SCR_OFFSET + CREG_INTERRUPT_VECTOR,
-				mask_val);
+		woken_cb(vedev, node->cond, irq);
 	}
 
 	return ret;
@@ -1125,24 +1099,44 @@ int ve_drv_wait_intr(struct ve_dev *vedev, struct ve_wait_irq_arg *usr)
 
 	struct ve_wait_irq_arg krn;
 	struct timespec timeout;
+	struct ve_wait_irq *cond;
+	size_t cond_size;
 
 	pdev_trace(vedev->pdev);
 
+	cond_size = vedev->arch_class->ve_wait_irq_size;
+	cond = kmalloc(cond_size, GFP_KERNEL);
+	if (!cond)
+		return -ENOMEM;
 	ret = copy_from_user(&krn, usr, sizeof(struct ve_wait_irq_arg));
-	if (ret)
-		return -EFAULT;
+	if (ret) {
+		retval = -EFAULT;
+		goto err;
+	}
 	ret = copy_from_user(&timeout, krn.timeout, sizeof(struct timespec));
-	if (ret)
-		return -EFAULT;
+	if (ret) {
+		retval = -EFAULT;
+		goto err;
+	}
+	ret = copy_from_user(cond, krn.bits, cond_size);
+	if (ret) {
+		retval = -EFAULT;
+		goto err;
+	}
+	if (cond->ve_irq_type != vedev->arch_class->ve_irq_type) {
+		retval = -EINVAL;
+		goto err;
+	}
 
-	retval = _ve_drv_wait_intr(vedev, &krn.bits, &timeout);
+	retval = vedev->arch_class->ve_arch_wait_intr(vedev, cond, &timeout);
 	if (retval < 0)
-		return retval;
+		goto err;
 
-	ret = copy_to_user(usr, &krn, sizeof(struct ve_wait_irq_arg));
+	ret = copy_to_user(krn.bits, cond, cond_size);
 	if (ret)
-		return -EFAULT;
-
+		retval = -EFAULT;
+ err:
+	kfree(cond);
 	return retval;
 }
 
@@ -1473,8 +1467,18 @@ int ve_drv_reset_exsrar_mem(struct ve_dev *vedev, int core_id)
  * @return 0 if it is permitted to call.
  *         -EPERM if it is not permitted to call.
  */
-static int ve_check_permission(unsigned int cmd)
+static int ve_check_permission(const struct ve_dev *vedev, unsigned int cmd)
 {
+	int (*check)(const struct ve_dev *, unsigned int, int *);
+	
+	check= vedev->arch_class->ve_arch_ioctl_check_permission;
+	if (check) {
+		int handled = 0;
+		int rv = check(vedev, cmd, &handled);
+		if (handled)
+			return rv;
+	}
+
 	/**
 	 * VEDRV_CMD_WAIT_EXCEPTION is allowed to be called from anyone
 	 */
@@ -1711,6 +1715,7 @@ long ve_drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	struct ve_task *task;
 	struct ve_dev *vedev;
 	struct ve_node *node;
+	long (*arch_ioctl)(struct file *, struct ve_dev *, unsigned int, unsigned long, int *);
 
 	if (filp->private_data == NULL)
 		return -ESRCH;
@@ -1721,16 +1726,21 @@ long ve_drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	pdev_trace(vedev->pdev);
 
-	ret = ve_check_permission(cmd);
+	ret = ve_check_permission(vedev, cmd);
 	if (ret)
 		return ret;
 
 	pdev_trace(vedev->pdev);
 
+	arch_ioctl = vedev->arch_class->ve_arch_ioctl;
+	if (arch_ioctl) {
+		int handled = 0;
+		ret = arch_ioctl(filp, vedev, cmd, arg, &handled);
+		if (handled)
+			return ret;
+	}
+
 	switch (cmd) {
-	case VEDRV_CMD_UPDATE_FIRMWARE:
-		ret = ve_firmware_update(vedev);
-		break;
 	case VEDRV_CMD_WAIT_INTR:
 		ret = ve_drv_wait_intr(vedev,
 				(struct ve_wait_irq_arg __user *)arg);
@@ -1780,9 +1790,6 @@ long ve_drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		ret = ve_drv_assign_task_to_core(vedev,
 				(struct ve_tid_core __user *)arg);
 		break;
-	case VEDRV_CMD_UNASSIGN_TASK:
-		ret = ve_drv_unassign_task_from_core(vedev, (pid_t)arg);
-		break;
 	case VEDRV_CMD_REVIVE_TASK:
 		ret = ve_drv_revive_ve_task(vedev, (pid_t)arg);
 		break;
@@ -1813,9 +1820,6 @@ long ve_drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	case VEDRV_CMD_RST_INTR_COUNT:
 		ret = ve_drv_reset_intr_count(vedev, (uint64_t)arg);
-		break;
-	case VEDRV_CMD_VE_RESET:
-		ret = ve_chip_reset_sbr(vedev, (uint64_t)arg);
 		break;
 	case VEDRV_CMD_HOST_PID:
 		ret = ve_drv_host_pid(vedev, (struct ve_get_host_pid *)arg);

@@ -1,0 +1,72 @@
+#
+# Copyright (C) 2017-2018 NEC Corporation
+# This file is part of VE Driver.
+#
+# VE Driver is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# VE Driver is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with the VE Driver; if not, see
+# <http://www.gnu.org/licenses/>.
+#
+#
+# sensor_ve3.tbl
+#
+# Definition of sensor sysfs file number
+# and corresponding decoder for VE3
+#
+# format:
+# <sensor number>	<decoder macro>
+
+
+1	ve_drv_sysfs_sensor_type_N
+2	ve_drv_sysfs_sensor_type_N
+3	ve_drv_sysfs_sensor_type_N
+4	ve_drv_sysfs_sensor_type_N
+5	ve_drv_sysfs_sensor_type_N
+6	ve_drv_sysfs_sensor_type_N
+7	ve_drv_sysfs_sensor_type_N
+8	ve_drv_sysfs_sensor_type_N
+9	ve_drv_sysfs_sensor_type_N
+10	ve_drv_sysfs_sensor_type_N
+11	ve_drv_sysfs_sensor_type_N
+12	ve_drv_sysfs_sensor_type_N
+13	ve_drv_sysfs_sensor_type_N
+14	ve_drv_sysfs_sensor_type_N
+15	ve_drv_sysfs_sensor_type_N
+16	ve_drv_sysfs_sensor_type_N
+17	ve_drv_sysfs_sensor_type_N
+18	ve_drv_sysfs_sensor_type_N
+19	ve_drv_sysfs_sensor_type_N
+20	ve_drv_sysfs_sensor_type_N
+21	ve_drv_sysfs_sensor_type_N
+22	ve_drv_sysfs_sensor_type_N
+23	ve_drv_sysfs_sensor_type_N
+24	ve_drv_sysfs_sensor_type_N
+25	ve_drv_sysfs_sensor_type_N
+26	ve_drv_sysfs_sensor_type_N
+27	ve_drv_sysfs_sensor_type_N
+28	ve_drv_sysfs_sensor_type_N
+29	ve_drv_sysfs_sensor_type_N
+30	ve_drv_sysfs_sensor_type_N
+31	ve_drv_sysfs_sensor_type_N
+32	ve_drv_sysfs_sensor_type_N
+33	ve_drv_sysfs_sensor_type_N
+34	ve_drv_sysfs_sensor_type_N
+35	ve_drv_sysfs_sensor_type_N
+36	ve_drv_sysfs_sensor_type_N
+37	ve_drv_sysfs_sensor_type_N
+38	ve_drv_sysfs_sensor_type_N
+39	ve_drv_sysfs_sensor_type_N
+40	ve_drv_sysfs_sensor_type_N
+41	ve_drv_sysfs_sensor_type_N
+42	ve_drv_sysfs_sensor_type_N
+
+
