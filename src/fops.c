@@ -905,6 +905,9 @@ int ve_drv_release(struct inode *ino, struct file *filp)
 		pdev_dbg(vedev->pdev,
 			"task %d is killed but still assigned to the core\n",
 			pid_vnr(task->pid));
+#if (KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE)
+		fallthrough;
+#endif
 	case TASK_STATE_READY:
 		/*
 		 * Change state to released.
@@ -1041,7 +1044,13 @@ int ve_drv_reset_intr_count(struct ve_dev *vedev, uint64_t core_id)
 
 	return 0;
 }
-
+#if (KERNEL_VERSION(5, 0, 0) <= LINUX_VERSION_CODE)
+static inline unsigned long timespec_to_jiffies(const struct timespec *value)
+{
+	struct timespec64 ts = *(const struct timespec64 *)(value);
+        return timespec64_to_jiffies(&ts);
+}
+#endif
 /**
  * @brief Wait for specific interrupt such as DMA, Error, and so on.
  *        (internal function)

@@ -39,6 +39,7 @@
 #include <linux/kref.h>
 #include "hw.h"
 #include "ve_drv.h"
+#include <linux/version.h>
 
 /* print macros */
 #define pdev_trace(pdev) dev_dbg(&pdev->dev, "trace")
@@ -46,6 +47,10 @@
 #define pdev_err(pdev, fmt, args...) dev_err(&pdev->dev, fmt, ## args)
 #define pdev_info(pdev, fmt, args...) dev_info(&pdev->dev, fmt, ## args)
 #define pdev_warn(pdev, fmt, args...) dev_warn(&pdev->dev, fmt, ## args)
+
+#if (KERNEL_VERSION(5, 0, 0) <= LINUX_VERSION_CODE)
+#define timespec timespec64
+#endif
 
 /**
  * @brief VE task state

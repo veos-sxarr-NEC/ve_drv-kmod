@@ -119,7 +119,15 @@ int ve_drv_mmap(struct file *filp, struct vm_area_struct *vma)
 	}
 	task->mmap = true;
 	spin_unlock_irqrestore(&vedev->node->lock, flags);
-
+#if RHEL_RELEASE_VERSION(RHEL_MAJOR, RHEL_MINOR) > RHEL_RELEASE_VERSION(8, 5)
+	//
+	// VM_PFNMAP with only VM_SHARED , no VM_PRIVATE
+	//
+	if( is_cow_mapping( vma->vm_flags ) ){
+		pdev_dbg(vedev->pdev,"COW with VM_PFNMAP  vm_flags=0x%lx\n",vma->vm_flags );
+		return -EINVAL;
+	}
+#endif
 	/* check range */
 	offset = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;

@@ -142,7 +142,11 @@ const struct ve_arch_class *ve_drv_probe_arch_class(struct ve_dev *vedev)
  *
  * @return always 0
  */
+#if RHEL_RELEASE_VERSION(RHEL_MAJOR, RHEL_MINOR) > RHEL_RELEASE_VERSION(8, 8)
+static int ve_dev_uevent(RH_KABI_CONST struct device *dev, struct kobj_uevent_env *env)
+#else
 static int ve_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
+#endif
 {
 	add_uevent_var(env, "DEVMODE=%#o", 0666);
 	return 0;
@@ -743,7 +747,11 @@ static int ve_map_bar(struct ve_dev *dev)
 			size = 0x8000000;
 		}
 
+#if (KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE)
 		dev->bar[bar] = ioremap_nocache(dev->pbar[bar], size);
+#else
+		dev->bar[bar] = ioremap(dev->pbar[bar], size);
+#endif
 		if (dev->bar[bar] == NULL) {
 			pdev_err(dev->pdev, "ioremap for BAR%d was failed\n",
 					bar);
@@ -967,6 +975,19 @@ int ve_check_pci_link(struct pci_dev *pdev)
 	return 0;
 }
 
+#if (KERNEL_VERSION(5, 0, 0) <= LINUX_VERSION_CODE)
+/* Copied from vmlinux.h */
+struct pci_cap_saved_data {
+	u16 cap_nr;
+	bool cap_extended;
+	unsigned int size;
+	u32 data[0];
+};
+struct pci_cap_saved_state {
+	struct hlist_node next;
+	struct pci_cap_saved_data cap;
+};
+#endif
 /* Copied from drivers/pci/pci.c */
 static struct pci_cap_saved_state *_pci_find_saved_cap(struct pci_dev *pci_dev,
 		u16 cap, bool extended)
@@ -1268,7 +1289,11 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_init_dma;
 	}
 	/* allocate coherent DMA address (use for EXSRAR target) */
+#if (KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE)
 	vedev->vdma_addr = dma_zalloc_coherent(&pdev->dev,
+#else
+	vedev->vdma_addr = dma_alloc_coherent(&pdev->dev,
+#endif
 					sizeof(uint64_t) *
 					vedev->arch_class->max_core_num,
 					&vedev->pdma_addr, GFP_KERNEL);

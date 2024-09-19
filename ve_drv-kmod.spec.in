@@ -66,6 +66,7 @@ echo "override %{kmod_name} * weak-updates/%{kmod_name}" > kmod-%{kmod_name}.con
 
 %build
 %configure --with-release-id=@RELEASE@ --with-systemd-unitdir=@SYSTEMD_UNITDIR@ --with-kernel=%{KVER}
+export KBUILD_MODPOST_WARN=1
 make %{?_smp_mflags}
 
 %install
