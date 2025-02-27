@@ -28,6 +28,7 @@
 #include <linux/version.h>
 #include <linux/kmod.h>
 #include <linux/moduleparam.h>
+#include <linux/cpufeature.h>
 #include "ve_drv.h"
 #include "hw.h"
 #include "internal.h"
@@ -38,6 +39,31 @@ module_param(wait_sec_ve_init_done, int, 0600);
 MODULE_PARM_DESC(wait_sec_ve_init_done,
                  "This parameter is wait time HW init check.");
 
+int disable_card_reset_at_init = 0;
+module_param(disable_card_reset_at_init, int, 0600);
+MODULE_PARM_DESC(disable_card_reset_at_init,
+                 "This parameter disable reset card at init.");
+
+static int ResetARM(struct ve_dev *vedev );
+
+static bool check_virtualization(struct ve_dev *vedev)
+{
+
+	if ( boot_cpu_has(X86_FEATURE_HYPERVISOR) ){
+		/* Card reset is not supported within virtulaization */
+		pdev_err(vedev->pdev ,
+			 "Reset of ARM#1 is not possible within virtualization");
+		return true;
+	} else {
+		if ( disable_card_reset_at_init == 1 ) {
+			pdev_err(vedev->pdev ,
+			"disable_card_reset_at_init = 1, Did not reset card");
+			return true;
+		} else {
+			return false;
+		}
+	}
+}
 
 static int ve3_fill_hw_info(struct ve_dev *vedev)
 {
@@ -352,22 +378,106 @@ static int ve3_check_stopped(struct ve_dev *vedev)
 	return 1;
 }
 
+/**
+ * @brief Check the hardware identification value of the config register
+ *
+ * @param vedev : ve_dev structure pointer
+ * @param sec   : timeout sec
+ * @param Notify:
+ *
+ * -1: The VE driver will wait for the initialization to complete.
+ *     When a hardware error occurs, it does not notify the application.
+ *     This behavior is specified in the probe processing at the beginning.
+ *
+ *  0: The VE driver will wait for the initialization to complete.
+ *     When ARM#1 does not start, reset the ve card. If recovery fails or
+ *     if other hardware errors have already occurred, set ve_state to UNAVAILABLE.
+ *     It does not notify the application of the hardware error.
+ *     This behavior is specified in the probe processing, but only in the
+ *     final stages of the process.
+ *
+ *  1: The VE driver will wait for the initialization to complete.
+ *     When a hardware error occurs, set ve_state to UNAVAILABLE and
+ *     notify the application of the hardware error.
+ *     This behavior is specified in the ioctl, which can be used to reset
+ *     the card in case of hardware errors.
+ *
+ * @return Error Status
+ *    success: 0
+ *    fail   : -EIO,-ETIME
+ *
+ */
 static int ve3_wait_hw_identifier( struct ve_dev *vedev , int sec, int notify)
 {
 	u32 data[VE3_VCR_SIZE];
 	int ret;
 	int sec_count=0;
+	int reset_init = 0;
 
 	do {
  		ret = ve_drv_read_ve_config_regs(vedev, VE3_VCR_SIZE, data);
 		if (ret != 0)
 			return -EIO;
+
+		/* check ARM#1 BOOT FAIL */
+		if( notify == 0 &&
+		    (data[10] & VE3_HWIDENT_INIT_FAIL ) &&
+		    (data[10] & VE3_HWIDENT_ARM1_FAIL ) ){
+
+			if( check_virtualization(vedev) ){
+				/* Does not recover */
+				ret = -EIO;
+				goto  init_fail;
+			}
+			if( reset_init == 0 ){
+				pdev_info(vedev->pdev ,
+					  "Resetting a VE card to start ARM#1\n");
+			} else {
+				/* agin ARM#1 BOOT fail */
+				pdev_err(vedev->pdev ,
+					 "Failed to start ARM#1\n");
+				/* Could not recovered */
+				ret = -EIO;
+				goto  init_fail;
+			}
+			/* do card reset */
+			ret = ResetARM(vedev);
+			if( ret == 0 ){
+				sec_count = 0;
+				reset_init += 1;
+				/*
+				 * Only when it is not in a virtual environment,
+				 * and arm #1 fails initially, and the card
+				 * reset is successful.
+				 */
+				pdev_info(vedev->pdev ,
+					  "ARM#1 reset complete\n");
+				/*
+				 * Check again in the next loop
+				 */
+				continue;
+
+			} else {
+				/* card reset fail */
+				pdev_err(vedev->pdev ,
+					 "ARM#1 reset failed\n");
+				/* Could not recovered */
+				ret = -EIO;
+				goto  init_fail;
+			}
+		}
+
 		/* check INIT FAIL BIT */
-		if ( data[10] & 0x20000000 ){
-			if ( data[10] & 0x10000000 ){
-				pdev_err(vedev->pdev , "HW init check fail(4)\n");
-			}else{
-				pdev_err(vedev->pdev , "HW init check fail(2)\n");
+		if ( data[10] & VE3_HWIDENT_INIT_FAIL ){
+			if ( notify != -1 &&
+			     (data[10] & VE3_HWIDENT_ARM1_FAIL) == 0 ) {
+				if ( data[10] & VE3_HWIDENT_INIT_DONE ){
+					pdev_err(vedev->pdev ,
+						 "HW init check fail(4)\n");
+				} else {
+					pdev_err(vedev->pdev ,
+						 "HW init check fail(2)\n");
+				}
 			}
 			ret = -EIO;
 			goto  init_fail;
@@ -375,38 +485,42 @@ static int ve3_wait_hw_identifier( struct ve_dev *vedev , int sec, int notify)
 		/*
 		 * check init DONE bit( This point, INIT FAIL=0 )
 		 */
-		if ( data[10] & 0x10000000 ){
+		if ( data[10] & VE3_HWIDENT_INIT_DONE ){
 			/*
 			 * get NUMAMODE bit
 			 */
-		  if( notify != -1) {
-			vedev->node->partitioning_mode =
-				(uint8_t)((data[10] & 0x80000000) >> 31);
-		  }
-		  if( notify != 0)
-		    pdev_info(vedev->pdev , "HW init check OK (%d)\n", sec_count);
+			if( notify != -1) {
+				vedev->node->partitioning_mode =
+					(uint8_t)
+					((data[10] & VE3_HWIDENT_NUMA) >> 31);
+			}
+			if( notify != 0 || (notify == 0 && reset_init == 1 ))
+				pdev_info(vedev->pdev ,
+					  "HW init check OK (%d)\n", sec_count);
 
-		  return 0;
+			return 0;
 		}
 		if( notify != 0 &&  sec_count % 10 == 0 )
-		  pdev_dbg(vedev->pdev , "HW init check try %d\n", sec_count);
+			pdev_dbg(vedev->pdev ,
+				 "HW init check try %d\n", sec_count);
 		sec_count++;
 		ssleep(1);
 
 	} while(sec_count < sec );
 	if( notify != 0)
-	  pdev_err(vedev->pdev , "HW init check timeout (%dsec)\n",sec_count);
+		pdev_err(vedev->pdev ,
+			 "HW init check timeout (%dsec)\n",sec_count);
 	ret = -ETIME;
  init_fail:
 	/*
 	 * get NUMAMODE bit
 	 */
 	if( notify != -1) {
-	  vedev->node->partitioning_mode =
-	    (uint8_t)((data[10] & 0x80000000) >> 31);
-	  vedev->node->ve_state = VE_ST_UNAVAILABLE;
-	  if ( notify )
-	    sysfs_notify(&vedev->device->kobj, NULL, "ve_state");
+		vedev->node->partitioning_mode =
+			(uint8_t)((data[10] & VE3_HWIDENT_NUMA) >> 31);
+		vedev->node->ve_state = VE_ST_UNAVAILABLE;
+		if ( notify )
+			sysfs_notify(&vedev->device->kobj, NULL, "ve_state");
 	}
 	return ret;
 }
@@ -511,6 +625,7 @@ static int ve3_recover_from_chip_reset(struct ve_dev *vedev, u16 *aer_cap,
 	err = ve_recover_from_link_down(vedev, aer_cap, fw_update, sbr);
 	if (err)
 		return err;
+
 	/* Enable MSI-X */
 	if (enable_irq) {
 		cond = (struct ve3_wait_irq *)vedev->node->cond;
@@ -524,6 +639,7 @@ static int ve3_recover_from_chip_reset(struct ve_dev *vedev, u16 *aer_cap,
 		if (err)
 			return err;
 	}
+
 	return 0;
 }
 
@@ -706,6 +822,53 @@ int ve_drv_ve3_reset(struct ve_dev *vedev, uint64_t reset_level)
  err_state:
 
 	mutex_unlock(&vedev->node->sysfs_mutex);
+	return err;
+}
+
+static int ResetARM(struct ve_dev *vedev ) {
+	/* still not setuped in init, so irq=0 */
+	int irq = 0;
+	/* ve3 is always 0 */
+	int update_only = 0;
+	/* card reset = 0, function = 2 */
+	uint64_t reset_level= 0;
+
+	int err = 0;
+	int retry=0;
+	u16 aer_cap;
+
+	pdev_info(vedev->pdev, "Card Reset at init \n");
+        err = ve_prepare_for_chip_reset(vedev, &aer_cap, irq, reset_level);
+        if (err)
+		goto err_state;
+
+	/*
+	 * card reset
+	 */
+	do_ve3_card_reset(vedev);
+
+        /* Wait wait_after_vereset_sec sec */
+        do {
+		ssleep(1);
+		err = ve_check_pci_link(vedev->pdev);
+        } while( ++retry < wait_after_vereset_sec && err );
+
+        if(err){
+		pdev_err(vedev->pdev,
+			 "Waited for %d seconds, but Card reset failed\n",
+			 retry);
+        }
+        err = ve3_recover_from_chip_reset(vedev, &aer_cap, irq, update_only,
+					  reset_level);
+        if(err)
+		goto err_state;
+	/*
+	 * wait for init done flag to reinit
+	 */
+	ssleep(10);
+
+err_state:
+
 	return err;
 }
 

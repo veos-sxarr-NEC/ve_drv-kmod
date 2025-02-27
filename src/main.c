@@ -1232,9 +1232,9 @@ static int ve_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (vedev->arch_class->init_early) {
 		err = vedev->arch_class->init_early(vedev);
 		if (err){
-			pdev_err(pdev,
-				 "failed init_early(%d)",
-				 err);
+			pdev_warn(pdev,
+				 "checked init_early (%d)",
+				  err);
 			/*
 			 * not error return
 			 */

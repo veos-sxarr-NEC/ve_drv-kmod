@@ -47,6 +47,14 @@ static inline int is_dma_interrupt(const struct ve3_wait_irq *irq) {
 /* PCI config */
 #define VE3_VCR_SIZE				(13) /* !< 32bits * 13 */
 
+/* HW Initialization identifier */
+#define VE3_HWIDENT_INIT_DONE			(0x10000000)
+#define VE3_HWIDENT_INIT_FAIL			(0x20000000)
+#define VE3_HWIDENT_ARM1_FAIL			(0x40000000)
+#define VE3_HWIDENT_NUMA			(0x80000000)
+
+
+
 /* Core User Registers (BAR4) */
 #define UREG_EXS_OFFSET				(0x0000)
 
